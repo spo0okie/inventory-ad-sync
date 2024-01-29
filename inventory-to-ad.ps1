@@ -23,6 +23,7 @@
 . "$($PSScriptRoot)\..\config.priv.ps1"
 . "$($PSScriptRoot)\..\libs.ps1\lib_funcs.ps1"
 . "$($PSScriptRoot)\..\libs.ps1\lib_inventory.ps1"
+. "$($PSScriptRoot)\..\libs.ps1\lib_usr_ad.ps1"
 
 
 #запись данных о пользователе в БД
