@@ -51,12 +51,8 @@ function FindUser() {
 	(
 		[object]$user
 	)
-    #Ищем пользователя последовательно:
-	#Если у нас есть ИНН ищем по нему
-    #Если у нас есть организация и табельный - ищем конкретного
-    #Если у нас есть только табельный - считаем что организация=1 и GOTO 2
-    #Если у нас есть ФИО - ищем по ФИО
-    #Если у нас есть Логин - ищем по Логину
+
+	#Если у нас есть только табельный - считаем что организация=1
     $org_id=$user.employeeNumber
     if (($org_id.Length -eq 0) -or ( -not $mutiorg_support)) {
         #если организация не заявлена, то первая
@@ -65,60 +61,63 @@ function FindUser() {
         $org_id=1
     }
 
-    if ($user.adminDescription.Length -gt 0) {
-		$reqParams=@{uid=$user.adminDescription}
-    } elseif ($user.employeeID.Length -gt 0) {
-        #табельный есть:
-        #запрос пользователя будет по организации и табельному
-        $reqParams=@{num=$user.employeeID;org=$org_id}
-    } elseif ($user.displayName.Length -gt 0) {
-        $reqParams=@{name=$user.displayName}
-    } elseif ($user.login.sAMAccountname -gt 0) {
-        $reqParams=@{login=$user.sAMAccountname}
-    } else {
-        werinigLog("WARNING: user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] - don't know how to search 0_o")
-        return 'error'
-    }
+	$expand='ln,mn,fn,orgStruct,org'
+    #Ищем пользователя последовательно:
 
+    #Если у нас есть Логин - ищем по Логину - должна быть конкретная запись, т.к. несколько логинов быть не должно
+	$invUser=getInventoryObj 'users' '' @{
+		login=$user.sAMAccountname;
+		expand=$expand;
+	}
 
-	$reqParams['expand']='ln,mn,fn,orgStruct';
+    #Если у нас есть организация и табельный - ищем конкретного, т.к. комбинация табельный и орг тоже уникальная
+	if (($invUser -isnot [PSCustomObject]) -and ($user.employeeID.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
+		num=$user.employeeID;
+		org=$org_id;
+		expand=$expand;
+	}}
+	
+	#Если у нас есть ИНН ищем по нему - тут может найтись несколько и выбирается приоритетная сортировка в самой инвентори (лучший тип трудоустройства и не уволен)
+	if (($invUser -isnot [PSCustomObject]) -and ($user.adminDescription.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
+		uid=$user.adminDescription;
+		expand=$expand;
+	}}
 
-	#пробуем найти нашего сотрудника	
-	$invUser=getInventoryObj 'users' '' $reqParams
-    
-	if ($invUser -isnot [PSCustomObject]) {
-        #неудача!
-        $err=$_.Exception.Response.StatusCode.Value__
-        warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] not found in Inventory by $(paramString $reqParams)")
-        #Действуем по плану Б:
-        #В имени сотрудника может быть вбит табельный. Ищем его по табельному из имени:
-        $reqParams=@{
-			num=$user.displayName;
-			org=$org_id;
-			expand='ln,mn,fn,orgStruct';
-		}
-		
-		$invUser=getInventoryObj 'users' '' $reqParams
-		if ($invUser -isnot [PSCustomObject]) {
-            warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] not found in Inventory by $(paramString $reqParams)")
-            return 'error'
-        }
-    }
-
+	#Если у нас есть ФИО - ищем по ФИО - тут тоже несколько и тоже лучший
+	if (($invUser -isnot [PSCustomObject]) -and ($user.displayName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
+		name=$user.displayName;
+		expand=$expand;
+	}}
+	
+	#Последний сценарий - табельник вместо ФИО - тут по идее должен находиться один, т.к. такой механизм нужно применять только при сквозной нумерации табельников
+	if (($invUser -isnot [PSCustomObject]) -and ($user.displayName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
+		num=$user.displayName;
+		expand=$expand;
+	}}
+	
 	#если пользователь уволен, и мы искали его по табельнику и у нас есть его uid, то надо поискать по UID (вдруг другая должность есть)
-	if ( ($invUser.Uvolen -eq "1") -and ($invUser.EmployeeID.Length -gt 0) ) {
+	if (($invUser -is [PSCustomObject]) -and ($invUser.Uvolen -eq "1")) {
 		$uid='';
+		
+		#если UID проставлен в АД - берем оттуда, иначе из инвентори
 		if ($user.adminDescription) {
 			$uid=$user.adminDescription
 		} elseif ($invUser.uid) {
 			$uid=$invUser.uid
 		}
+		
 		spooLog "Searching $($user.displayName) is dismissed, searching other employments ($uid)..."
-		if ($uid) {
-			$user.EmployeeID='';
-			$invUser=FindUser($user);
-		}
+		if ($uid) {$invUser=getInventoryObj 'users' '' @{
+			uid=$uid;
+			expand=$expand;
+		}}
 	}
+
+	#Если все-таки не нашли
+	if ($invUser -isnot [PSCustomObject]) {
+        warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] - not found in inventory")
+        return 'error'
+    }
 
 	return $invUser
 }
@@ -167,7 +166,8 @@ function ParseUser() {
 		} else {
 			if ($auto_dismiss) {
 				spooLog($user.sAMAccountname+ ": user dissmissed! Deactivating")
-				Start-Process -FilePath $dismiss_script -ArgumentList $user.sAMAccountname -NoNewWindow
+				DisableADUser($user)
+				#Start-Process -FilePath $dismiss_script -ArgumentList $user.sAMAccountname -NoNewWindow
 				return
 			} else {
 				spooLog($user.sAMAccountname+ ": user dissmissed! Deactivation needed!")
@@ -239,11 +239,11 @@ function ParseUser() {
 
 	#Организация
 	if (
-		($invUser.org.name.Length -gt 0 ) -and
-		($user.company -ne $invUser.org.name )
+		($invUser.org.uname.Length -gt 0 ) -and
+		($user.company -ne $invUser.org.uname )
 	){
-		spooLog($user.sAMAccountname+": got AD Org ["+$user.company+"] instead of ["+$invUser.org.name+"]")
-		$user.company=$invUser.org.name
+		spooLog($user.sAMAccountname+": got AD Org ["+$user.company+"] instead of ["+$invUser.org.uname+"]")
+		$user.company=$invUser.org.uname
 		$needUpdate = $true
 	}
 
@@ -311,6 +311,7 @@ function ParseUser() {
 	#Внутренний номер телефона
 	#Запрашиваем номер телефона, привязанный к пользователю в Инвентаризации
 	$invUserPh=callInventoryRestMethod 'GET' 'phones' 'search-by-user' @{id=$invUser.id} $true
+	$invUserPh=$invUserPh.trim('"')
     if ($invUserPh -eq 'null') {$invUserPh=''}
 	#если нужно почистить телефон	
 	if (($invUserPh -eq "") -and ($user.Pager.Length -gt 0)) {
@@ -321,7 +322,7 @@ function ParseUser() {
 		}					
 	} elseIf (
 		($invUserPh.length -gt 2 ) -and 
-		($invUserPh -ne $user.Pager)
+		([string]$invUserPh -ne [string]$user.Pager)
 	) {
 		spooLog($user.sAMAccountname+": got AD Phone ["+$user.pager+"] instead of ["+$invUserPh+"]")
 		$user.pager=$invUserPh
@@ -392,14 +393,18 @@ Import-Module ActiveDirectory
 if ($args.Length -gt 0) {
 	$users = Get-ADUser $args[0] -properties Name,cn,sn,givenName,DisplayName,sAMAccountname,company,department,title,employeeNumber,employeeID,mail,pager,mobile,telephoneNumber,adminDescription
 } else {
-	$users = Get-ADUser -Filter {enabled -eq $true} -SearchBase $u_OUDN -properties Name,cn,sn,givenName,DisplayName,sAMAccountname,company,department,title,employeeNumber,employeeID,mail,pager,mobile,telephoneNumber,adminDescription
+	foreach ($params in $inventory2ad_sync) {
+		$u_OUDN=$params.u_OUDN
+		$f_OUDN=$params.f_OUDN
+		$users = Get-ADUser -Filter {enabled -eq $true} -SearchBase $u_OUDN -properties Name,cn,sn,givenName,DisplayName,sAMAccountname,company,department,title,employeeNumber,employeeID,mail,pager,mobile,telephoneNumber,adminDescription
+		$u_count = $users | measure 
+		Write-Host "Users to sync: " $u_count.Count
+
+		foreach($user in $users) {
+			#$user
+			ParseUser ($user)
+			#exit
+		}
+	}
 }
 
-$u_count = $users | measure 
-Write-Host "Users to sync: " $u_count.Count
-
-foreach($user in $users) {
-    #$user
-	ParseUser ($user)
-    #exit
-}
