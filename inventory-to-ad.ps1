@@ -1,24 +1,25 @@
-#Скрипт управление пользователем в АД:
+#РЎРєСЂРёРїС‚ СѓРїСЂР°РІР»РµРЅРёРµ РїРѕР»СЊР·РѕРІР°С‚РµР»РµРј РІ РђР”:
 #
-#в качестве параметра принимает JSON объект по этому пользователю
+#РІ РєР°С‡РµСЃС‚РІРµ РїР°СЂР°РјРµС‚СЂР° РїСЂРёРЅРёРјР°РµС‚ JSON РѕР±СЉРµРєС‚ РїРѕ СЌС‚РѕРјСѓ РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ
 #
-#ищет переданного пользователя в АД сначала по табельному номеру,
-#затем по ФИО
+#РёС‰РµС‚ РїРµСЂРµРґР°РЅРЅРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РІ РђР” СЃРЅР°С‡Р°Р»Р° РїРѕ С‚Р°Р±РµР»СЊРЅРѕРјСѓ РЅРѕРјРµСЂСѓ,
+#Р·Р°С‚РµРј РїРѕ Р¤РРћ
 #
-#Синхронизирует поля:
-# - ФИО
-# - Табельный номер
-# - Должность
-# - Подразделение
-# - Организация
+#РЎРёРЅС…СЂРѕРЅРёР·РёСЂСѓРµС‚ РїРѕР»СЏ:
+# - Р¤РРћ
+# - РўР°Р±РµР»СЊРЅС‹Р№ РЅРѕРјРµСЂ
+# - Р”РѕР»Р¶РЅРѕСЃС‚СЊ
+# - РџРѕРґСЂР°Р·РґРµР»РµРЅРёРµ
+# - РћСЂРіР°РЅРёР·Р°С†РёСЏ
 # 
 
-#как посмотреть лимит на длину поля? например для mobile вот так:
+#РєР°Рє РїРѕСЃРјРѕС‚СЂРµС‚СЊ Р»РёРјРёС‚ РЅР° РґР»РёРЅСѓ РїРѕР»СЏ? РЅР°РїСЂРёРјРµСЂ РґР»СЏ mobile РІРѕС‚ С‚Р°Рє:
 #dsquery * "cn=Schema,cn=Configuration,dc=yamalgazprom,dc=local" -Filter "(LDAPDisplayName=mobile)" -attr rangeUpper
 
-#у нас были затыки с полями
+#Сѓ РЅР°СЃ Р±С‹Р»Рё Р·Р°С‚С‹РєРё СЃ РїРѕР»СЏРјРё
 #mobile (64)
 #title (128)
+#department (64)
 
 . "$($PSScriptRoot)\..\config.priv.ps1"
 . "$($PSScriptRoot)\..\libs.ps1\lib_funcs.ps1"
@@ -26,7 +27,7 @@
 . "$($PSScriptRoot)\..\libs.ps1\lib_usr_ad.ps1"
 
 
-#запись данных о пользователе в БД
+#Р·Р°РїРёСЃСЊ РґР°РЅРЅС‹С… Рѕ РїРѕР»СЊР·РѕРІР°С‚РµР»Рµ РІ Р‘Р”
 function pushUserData() {
 	param
 	(
@@ -46,112 +47,120 @@ function pushUserData() {
 	}
 }
 
-#загрузить пользователя из Инвентаризации через REST API
+#Р·Р°РіСЂСѓР·РёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РёР· РРЅРІРµРЅС‚Р°СЂРёР·Р°С†РёРё С‡РµСЂРµР· REST API
 function FindUser() {
 	param
 	(
 		[object]$user
 	)
 
-	#Если у нас есть только табельный - считаем что организация=1
-    $org_id=$user.employeeNumber
-    if (($org_id.Length -eq 0) -or ( -not $mutiorg_support)) {
-        #если организация не заявлена, то первая
-        #эта ситуация скорее всего возникнет при переходе от инвентаризации версии под одну организацию
-        #к инвентаризации версии под множество. Когда БД уже с учетом организаций а АД еще нет
-        $org_id=1
-    }
+	#Р•СЃР»Рё Сѓ РЅР°СЃ РµСЃС‚СЊ С‚РѕР»СЊРєРѕ С‚Р°Р±РµР»СЊРЅС‹Р№ - СЃС‡РёС‚Р°РµРј С‡С‚Рѕ РѕСЂРіР°РЅРёР·Р°С†РёСЏ=1
+	$org_id=$user.employeeNumber
+	if (($org_id.Length -eq 0) -or ( -not $mutiorg_support)) {
+		#РµСЃР»Рё РѕСЂРіР°РЅРёР·Р°С†РёСЏ РЅРµ Р·Р°СЏРІР»РµРЅР°, С‚Рѕ РїРµСЂРІР°СЏ
+		#СЌС‚Р° СЃРёС‚СѓР°С†РёСЏ СЃРєРѕСЂРµРµ РІСЃРµРіРѕ РІРѕР·РЅРёРєРЅРµС‚ РїСЂРё РїРµСЂРµС…РѕРґРµ РѕС‚ РёРЅРІРµРЅС‚Р°СЂРёР·Р°С†РёРё РІРµСЂСЃРёРё РїРѕРґ РѕРґРЅСѓ РѕСЂРіР°РЅРёР·Р°С†РёСЋ
+		#Рє РёРЅРІРµРЅС‚Р°СЂРёР·Р°С†РёРё РІРµСЂСЃРёРё РїРѕРґ РјРЅРѕР¶РµСЃС‚РІРѕ. РљРѕРіРґР° Р‘Р” СѓР¶Рµ СЃ СѓС‡РµС‚РѕРј РѕСЂРіР°РЅРёР·Р°С†РёР№ Р° РђР” РµС‰Рµ РЅРµС‚
+		$org_id=1
+	}
 
 	$expand='ln,mn,fn,orgStruct,org'
-    #Ищем пользователя последовательно:
+	#РС‰РµРј РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕ:
 
-    #Если у нас есть Логин - ищем по Логину - должна быть конкретная запись, т.к. несколько логинов быть не должно
+	#Р•СЃР»Рё Сѓ РЅР°СЃ РµСЃС‚СЊ Р›РѕРіРёРЅ - РёС‰РµРј РїРѕ Р›РѕРіРёРЅСѓ - РґРѕР»Р¶РЅР° Р±С‹С‚СЊ РєРѕРЅРєСЂРµС‚РЅР°СЏ Р·Р°РїРёСЃСЊ, С‚.Рє. РЅРµСЃРєРѕР»СЊРєРѕ Р»РѕРіРёРЅРѕРІ Р±С‹С‚СЊ РЅРµ РґРѕР»Р¶РЅРѕ
 	$invUser=getInventoryObj 'users' '' @{
 		login=$user.sAMAccountname;
 		expand=$expand;
 	}
 
-    #Если у нас есть организация и табельный - ищем конкретного, т.к. комбинация табельный и орг тоже уникальная
+	#Р•СЃР»Рё Сѓ РЅР°СЃ РµСЃС‚СЊ РѕСЂРіР°РЅРёР·Р°С†РёСЏ Рё С‚Р°Р±РµР»СЊРЅС‹Р№ - РёС‰РµРј РєРѕРЅРєСЂРµС‚РЅРѕРіРѕ, С‚.Рє. РєРѕРјР±РёРЅР°С†РёСЏ С‚Р°Р±РµР»СЊРЅС‹Р№ Рё РѕСЂРі С‚РѕР¶Рµ СѓРЅРёРєР°Р»СЊРЅР°СЏ
 	if (($invUser -isnot [PSCustomObject]) -and ($user.employeeID.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
 		num=$user.employeeID;
 		org=$org_id;
 		expand=$expand;
 	}}
 	
-	#Если у нас есть ИНН ищем по нему - тут может найтись несколько и выбирается приоритетная сортировка в самой инвентори (лучший тип трудоустройства и не уволен)
+	#Р•СЃР»Рё Сѓ РЅР°СЃ РµСЃС‚СЊ РРќРќ РёС‰РµРј РїРѕ РЅРµРјСѓ - С‚СѓС‚ РјРѕР¶РµС‚ РЅР°Р№С‚РёСЃСЊ РЅРµСЃРєРѕР»СЊРєРѕ Рё РІС‹Р±РёСЂР°РµС‚СЃСЏ РїСЂРёРѕСЂРёС‚РµС‚РЅР°СЏ СЃРѕСЂС‚РёСЂРѕРІРєР° РІ СЃР°РјРѕР№ РёРЅРІРµРЅС‚РѕСЂРё (Р»СѓС‡С€РёР№ С‚РёРї С‚СЂСѓРґРѕСѓСЃС‚СЂРѕР№СЃС‚РІР° Рё РЅРµ СѓРІРѕР»РµРЅ)
 	if (($invUser -isnot [PSCustomObject]) -and ($user.adminDescription.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
 		uid=$user.adminDescription;
 		expand=$expand;
 	}}
 
-	#Если у нас есть ФИО - ищем по ФИО - тут тоже несколько и тоже лучший
+	#Р•СЃР»Рё Сѓ РЅР°СЃ РµСЃС‚СЊ Р¤РРћ - РёС‰РµРј РїРѕ Р¤РРћ - С‚СѓС‚ С‚РѕР¶Рµ РЅРµСЃРєРѕР»СЊРєРѕ Рё С‚РѕР¶Рµ Р»СѓС‡С€РёР№
 	if (($invUser -isnot [PSCustomObject]) -and ($user.displayName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
 		name=$user.displayName;
 		expand=$expand;
 	}}
 	
-	#Последний сценарий - табельник вместо ФИО - тут по идее должен находиться один, т.к. такой механизм нужно применять только при сквозной нумерации табельников
+	#РџРѕСЃР»РµРґРЅРёР№ СЃС†РµРЅР°СЂРёР№ - С‚Р°Р±РµР»СЊРЅРёРє РІРјРµСЃС‚Рѕ Р¤РРћ - С‚СѓС‚ РїРѕ РёРґРµРµ РґРѕР»Р¶РµРЅ РЅР°С…РѕРґРёС‚СЊСЃСЏ РѕРґРёРЅ, С‚.Рє. С‚Р°РєРѕР№ РјРµС…Р°РЅРёР·Рј РЅСѓР¶РЅРѕ РїСЂРёРјРµРЅСЏС‚СЊ С‚РѕР»СЊРєРѕ РїСЂРё СЃРєРІРѕР·РЅРѕР№ РЅСѓРјРµСЂР°С†РёРё С‚Р°Р±РµР»СЊРЅРёРєРѕРІ
 	if (($invUser -isnot [PSCustomObject]) -and ($user.displayName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
 		num=$user.displayName;
 		expand=$expand;
 	}}
 	
-	#если пользователь уволен, и мы искали его по табельнику и у нас есть его uid, то надо поискать по UID (вдруг другая должность есть)
+	#РµСЃР»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СѓРІРѕР»РµРЅ, Рё РјС‹ РёСЃРєР°Р»Рё РµРіРѕ РїРѕ С‚Р°Р±РµР»СЊРЅРёРєСѓ Рё Сѓ РЅР°СЃ РµСЃС‚СЊ РµРіРѕ uid, С‚Рѕ РЅР°РґРѕ РїРѕРёСЃРєР°С‚СЊ РїРѕ UID (РІРґСЂСѓРі РґСЂСѓРіР°СЏ РґРѕР»Р¶РЅРѕСЃС‚СЊ РµСЃС‚СЊ)
 	if (($invUser -is [PSCustomObject]) -and ($invUser.Uvolen -eq "1")) {
 		$uid='';
 		
-		#если UID проставлен в АД - берем оттуда, иначе из инвентори
+		#РµСЃР»Рё UID РїСЂРѕСЃС‚Р°РІР»РµРЅ РІ РђР” - Р±РµСЂРµРј РѕС‚С‚СѓРґР°, РёРЅР°С‡Рµ РёР· РёРЅРІРµРЅС‚РѕСЂРё
 		if ($user.adminDescription) {
 			$uid=$user.adminDescription
 		} elseif ($invUser.uid) {
 			$uid=$invUser.uid
 		}
 		
-		spooLog "Searching $($user.displayName) is dismissed, searching other employments ($uid)..."
-		if ($uid) {$invUser=getInventoryObj 'users' '' @{
-			uid=$uid;
-			expand=$expand;
-		}}
+		if ($uid) {	#РµСЃР»Рё UID РµСЃС‚СЊ, С‚Рѕ РёСЃРїРѕР»СЊР·СѓРµРј РµРіРѕ С‡С‚РѕР±С‹ РЅР°Р№С‚Рё РґСЂСѓРіРёРµ С‚СЂСѓРґРѕСѓСЃС‚СЂРѕР№СЃС‚РІР°
+			spooLog "$($user.displayName) is dismissed, searching other employments ($uid)..."
+			$invUser=getInventoryObj 'users' '' @{
+				uid=$uid;
+				expand=$expand;
+			}
+		} else {	#РёРЅР°С‡Рµ РёС‰РµРј РїРѕ Р¤РРћ (С‡С‚Рѕ С…СѓР¶Рµ, С‚.Рє. РЅРµ РёСЃРєР»СЋС‡Р°РµС‚ РїРѕР»РЅС‹С… РѕРґРЅРѕС„Р°РјРёР»СЊС†РµРІ
+			spooLog "$($user.displayName) is dismissed, searching other employments by Full Name..."
+			$invUser=getInventoryObj 'users' '' @{
+				name=$user.displayName;
+				expand=$expand;
+			}			
+		}
 	}
 
-	#Если все-таки не нашли
+	#Р•СЃР»Рё РІСЃРµ-С‚Р°РєРё РЅРµ РЅР°С€Р»Рё
 	if ($invUser -isnot [PSCustomObject]) {
-        warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] - not found in inventory")
-        return 'error'
-    }
+		warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] - not found in inventory")
+		return 'error'
+	}
 
 	return $invUser
 }
 
-#обработка пользователя
+#РѕР±СЂР°Р±РѕС‚РєР° РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
 function ParseUser() {
 	param
 	(
 		[object]$user
 	)
-	#Выставляем флажки
-	#Обновлять пользоватея в АД не надо
+	#Р’С‹СЃС‚Р°РІР»СЏРµРј С„Р»Р°Р¶РєРё
+	#РћР±РЅРѕРІР»СЏС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµСЏ РІ РђР” РЅРµ РЅР°РґРѕ
 	$needUpdate = $false
-	#Переименовывать пользователя в АД не надо
+	#РџРµСЂРµРёРјРµРЅРѕРІС‹РІР°С‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РІ РђР” РЅРµ РЅР°РґРѕ
 	$needRename = $false
-	#Увольнять пользователя в АД не надо
+	#РЈРІРѕР»СЊРЅСЏС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РІ РђР” РЅРµ РЅР°РґРѕ
 	$needDismiss = $false
 
 	
 	$invUser = FindUser($user)
 	
-	#Если пользователь не нашелся
+	#Р•СЃР»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅРµ РЅР°С€РµР»СЃСЏ
 	if ($invUser -eq "error") {
 		debugLog($user.sAMAccountname+": Skip: got SAP error")
 		return
 	}
 	
-	#проверка увольнения
+	#РїСЂРѕРІРµСЂРєР° СѓРІРѕР»СЊРЅРµРЅРёСЏ
 	if ($invUser.Uvolen -eq "1") {
-		#смотрим когда уволен
+		#СЃРјРѕС‚СЂРёРј РєРѕРіРґР° СѓРІРѕР»РµРЅ
 		if ($invUser.resign_date.Length -gt 0) {
 			$resign_date=[datetime]::parseexact($invUser.resign_date, $inventory_dateformat, $null)
-			#уже уволен?
+			#СѓР¶Рµ СѓРІРѕР»РµРЅ?
 			if ((Get-Date) -gt $resign_date) {
 				$needDismiss = $true
 			}
@@ -160,15 +169,20 @@ function ParseUser() {
 	
 	#
 	if ($needDismiss) {
-		#Уволенных увольняем
-		#проверяем исключения уволенных
+		#РЈРІРѕР»РµРЅРЅС‹С… СѓРІРѕР»СЊРЅСЏРµРј
+		#РїСЂРѕРІРµСЂСЏРµРј РёСЃРєР»СЋС‡РµРЅРёСЏ СѓРІРѕР»РµРЅРЅС‹С…
 		if ($auto_dismiss_exclude -eq $user.sAMAccountname) {
 			spooLog($user.sAMAccountname+ ": user dissmissed! Deactivation disabled (exclusion list)!")
 		} else {
 			if ($auto_dismiss) {
 				spooLog($user.sAMAccountname+ ": user dissmissed! Deactivating")
-				DisableADUser($user)
-				#Start-Process -FilePath $dismiss_script -ArgumentList $user.sAMAccountname -NoNewWindow
+				if ($dismiss_script) {
+					powershell.exe -noprofile -executionpolicy bypass -file "$dismiss_script" $user.sAMAccountname
+					# РЅРµ РїРѕР·РІРѕР»СЏРµС‚ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ *.ps1-СЃРєСЂРёРїС‚С‹
+					# Start-Process -FilePath $dismiss_script -ArgumentList $user.sAMAccountname -NoNewWindow
+				} else {
+					DisableADUser($user)
+				}
 				return
 			} else {
 				spooLog($user.sAMAccountname+ ": user dissmissed! Deactivation needed!")
@@ -178,7 +192,7 @@ function ParseUser() {
 	} 
 	
 	
-	#проверка пользователя на совпадение "названия" с ФИО
+	#РїСЂРѕРІРµСЂРєР° РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РЅР° СЃРѕРІРїР°РґРµРЅРёРµ "РЅР°Р·РІР°РЅРёСЏ" СЃ Р¤РРћ
 	if (
 		($user.name -ne $invUser.Ename) -or
 		($user.cn -ne $invUser.Ename)
@@ -188,7 +202,7 @@ function ParseUser() {
 	}
 
 
-	#проверка Выводимого имени пользователя на совпадение с ФИО
+	#РїСЂРѕРІРµСЂРєР° Р’С‹РІРѕРґРёРјРѕРіРѕ РёРјРµРЅРё РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РЅР° СЃРѕРІРїР°РґРµРЅРёРµ СЃ Р¤РРћ
 	if (
 		($user.displayName -ne $invUser.Ename) 
 	){
@@ -197,13 +211,13 @@ function ParseUser() {
 		$needUpdate = $true
 	}
 
-	#Грузим Ф И О по оттдельности
+	#Р“СЂСѓР·РёРј Р¤ Р Рћ РїРѕ РѕС‚С‚РґРµР»СЊРЅРѕСЃС‚Рё
 	$fn=($invUser.fn).trim()
 	$mn=($invUser.mn).trim()
 	$ln=($invUser.ln).trim()
 	$gn=($fn+" "+$mn).trim()
 
-	#проверка Имени и Фамилии пользователя на совпадение с Именем и Фамилией
+	#РїСЂРѕРІРµСЂРєР° РРјРµРЅРё Рё Р¤Р°РјРёР»РёРё РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РЅР° СЃРѕРІРїР°РґРµРЅРёРµ СЃ РРјРµРЅРµРј Рё Р¤Р°РјРёР»РёРµР№
 	if (
 		($user.givenName -ne $gn) -or
 		($user.sn -ne $ln)
@@ -228,17 +242,22 @@ function ParseUser() {
         }
 	}
 
-	#Подразделение
+	#РџРѕРґСЂР°Р·РґРµР»РµРЅРёРµ
+	$department=$invUser.orgStruct.name
+	if ($department.Length -gt 64) {
+		#РѕРіСЂР°РЅРёС‡РµРЅРёРµ РґР»РёРЅС‹ РїРѕР»СЏ
+		$department=$department.Substring(0,64)
+	}
 	if (
-		($invUser.orgStruct.name.Length -gt 0) -and
-		($user.department -ne $invUser.orgStruct.name )
+		($department.Length -gt 0) -and
+		($user.department -ne $department)
 	){
-		spooLog($user.sAMAccountname+": got AD Department ["+$user.department+"] instead of ["+$invUser.orgStruct.name+"]")
-		$user.department=$invUser.orgStruct.name
+		spooLog($user.sAMAccountname+": got AD Department ["+$user.department+"] instead of ["+$department+"]")
+		$user.department=$department
 		$needUpdate = $true
 	}
 
-	#Организация
+	#РћСЂРіР°РЅРёР·Р°С†РёСЏ
 	if (
 		($invUser.org.uname.Length -gt 0 ) -and
 		($user.company -ne $invUser.org.uname )
@@ -248,10 +267,10 @@ function ParseUser() {
 		$needUpdate = $true
 	}
 
-	#Должность
+	#Р”РѕР»Р¶РЅРѕСЃС‚СЊ
 	$title=$invUser.Doljnost
 	if ($title.Length -gt 128) {
-		#ограничение длины поля
+		#РѕРіСЂР°РЅРёС‡РµРЅРёРµ РґР»РёРЅС‹ РїРѕР»СЏ
 		$title=$title.Substring(0,128)
 	}
 	if (
@@ -270,24 +289,24 @@ function ParseUser() {
 		$needUpdate = $true
 	}
 		
-	#ID организации
+	#ID РѕСЂРіР°РЅРёР·Р°С†РёРё
 	if ($multiorg_support -and ($user.EmployeeNumber -ne $invUser.org_id) -and ($invUser.org_id.Length -gt 0)){
 		spooLog($user.sAMAccountname+": got AD Org ID ["+$user.EmployeeNumber+"] instead of ["+$invUser.org_id+"]")
 		$user.EmployeeNumber=$invUser.org_id
 		$needUpdate = $true
 	}
 	
-	#табельный номер
+	#С‚Р°Р±РµР»СЊРЅС‹Р№ РЅРѕРјРµСЂ
 	if (($user.EmployeeID -ne $invUser.employee_id) -and ($invUser.employee_id.Length -gt 0)){
 		spooLog($user.sAMAccountname+": got AD Numbr ["+$user.EmployeeID+"] instead of ["+$invUser.employee_id+"]")
 		$user.EmployeeID=$invUser.employee_id
 		$needUpdate = $true
 	}
 		
-	#мобильный номер телефона
+	#РјРѕР±РёР»СЊРЅС‹Р№ РЅРѕРјРµСЂ С‚РµР»РµС„РѕРЅР°
 	$correctedMobile= correctPhonesList($invUser.Mobile)
 	if ([string]$user.mobile -ne [string]$correctedMobile) {
-		#для поля мобильного делаем обработку на случай если оно стало пустым, т.к. это реальная ситуация, а запись в АД пустого значения делается через задницу
+		#РґР»СЏ РїРѕР»СЏ РјРѕР±РёР»СЊРЅРѕРіРѕ РґРµР»Р°РµРј РѕР±СЂР°Р±РѕС‚РєСѓ РЅР° СЃР»СѓС‡Р°Р№ РµСЃР»Рё РѕРЅРѕ СЃС‚Р°Р»Рѕ РїСѓСЃС‚С‹Рј, С‚.Рє. СЌС‚Рѕ СЂРµР°Р»СЊРЅР°СЏ СЃРёС‚СѓР°С†РёСЏ, Р° Р·Р°РїРёСЃСЊ РІ РђР” РїСѓСЃС‚РѕРіРѕ Р·РЅР°С‡РµРЅРёСЏ РґРµР»Р°РµС‚СЃСЏ С‡РµСЂРµР· Р·Р°РґРЅРёС†Сѓ
 		if ($correctedMobile -eq "") {
 			spooLog($user.sAMAccountname+": got AD mobile ["+$user.mobile+"] instead of [empty]")
 			if ($write_AD) {
@@ -301,7 +320,7 @@ function ParseUser() {
 		}
 	}
 
-	#городской номер телефона
+	#РіРѕСЂРѕРґСЃРєРѕР№ РЅРѕРјРµСЂ С‚РµР»РµС„РѕРЅР°
 	$correctedPhone=correctMobile($user.telephoneNumber)
 	if ([string]$user.telephoneNumber -ne [string]$correctedPhone) {
 		spooLog($user.sAMAccountname+": got AD telephoneNumber format ["+$user.telephoneNumber+"] instead of ["+$correctedPhone+"]")
@@ -309,12 +328,12 @@ function ParseUser() {
 		$needUpdate = $true
 	}
 
-	#Внутренний номер телефона
-	#Запрашиваем номер телефона, привязанный к пользователю в Инвентаризации
+	#Р’РЅСѓС‚СЂРµРЅРЅРёР№ РЅРѕРјРµСЂ С‚РµР»РµС„РѕРЅР°
+	#Р—Р°РїСЂР°С€РёРІР°РµРј РЅРѕРјРµСЂ С‚РµР»РµС„РѕРЅР°, РїСЂРёРІСЏР·Р°РЅРЅС‹Р№ Рє РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ РІ РРЅРІРµРЅС‚Р°СЂРёР·Р°С†РёРё
 	$invUserPh=callInventoryRestMethod 'GET' 'phones' 'search-by-user' @{id=$invUser.id} $true
 	$invUserPh=$invUserPh.trim('"')
     if ($invUserPh -eq 'null') {$invUserPh=''}
-	#если нужно почистить телефон	
+	#РµСЃР»Рё РЅСѓР¶РЅРѕ РїРѕС‡РёСЃС‚РёС‚СЊ С‚РµР»РµС„РѕРЅ	
 	if (($invUserPh -eq "") -and ($user.Pager.Length -gt 0)) {
 		spooLog($user.sAMAccountname+": got AD Phone ["+$user.pager+"] instead of ["+$invUserPh+"]")
 		if ($write_AD) {
@@ -330,9 +349,9 @@ function ParseUser() {
 		$needUpdate = $true
 	}
 
-	#Почта
+	#РџРѕС‡С‚Р°
 	if ([string]$user.mail -ne [string]$invUser.Email) {
-		$ad_mail=$false		#проверка что почта в Exchange
+		$ad_mail=$false		#РїСЂРѕРІРµСЂРєР° С‡С‚Рѕ РїРѕС‡С‚Р° РІ Exchange
 		foreach ($dom in $exchange_domains) {
 			if (([string]$user.mail).ToLower().EndsWith("@$($dom)".Tolower())) {
 				$ad_mail=$true;
@@ -352,7 +371,7 @@ function ParseUser() {
 
 	if ($needUpdate) {
 		if ($write_AD) {
-            #убираем пустые поля
+            #СѓР±РёСЂР°РµРј РїСѓСЃС‚С‹Рµ РїРѕР»СЏ
             #$user.PSObject.Properties | ForEach-Object {
                 #$_.Name+":"+$_.Value
                 #if ($_.Value -eq $null) {
@@ -379,7 +398,7 @@ function ParseUser() {
 		}
 	}
 
-	#push данных обратно в БД
+	#push РґР°РЅРЅС‹С… РѕР±СЂР°С‚РЅРѕ РІ Р‘Р”
 	if ([string]$user.sAMAccountname -ne [string]$invUser.Login) {
 		spooLog($user.sAMAccountname+": got SAP Login ["+$invUser.Login+"] instead of ["+$user.sAMAccountname+"]")
 		pushUserData $invUser.id Login $user.sAMAccountname
