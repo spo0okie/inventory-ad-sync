@@ -177,9 +177,7 @@ function ParseUser() {
 			if ($auto_dismiss) {
 				spooLog($user.sAMAccountname+ ": user dissmissed! Deactivating")
 				if ($dismiss_script) {
-					powershell.exe -noprofile -executionpolicy bypass -file "$dismiss_script" $user.sAMAccountname
-					# не позволяет использовать *.ps1-скрипты
-					# Start-Process -FilePath $dismiss_script -ArgumentList $user.sAMAccountname -NoNewWindow
+					Start-Process -FilePath $dismiss_script -ArgumentList $user.sAMAccountname -NoNewWindow
 				} else {
 					DisableADUser($user)
 				}
