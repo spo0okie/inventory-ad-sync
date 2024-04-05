@@ -99,29 +99,34 @@ function FindUser() {
 	
 	#если пользователь уволен, и мы искали его по табельнику и у нас есть его uid, то надо поискать по UID (вдруг другая должность есть)
 	if (($invUser -is [PSCustomObject]) -and ($invUser.Uvolen -eq "1")) {
-		$uid='';
-		
-		#если UID проставлен в АД - берем оттуда, иначе из инвентори
-		if ($user.adminDescription) {
-			$uid=$user.adminDescription
-		} elseif ($invUser.uid) {
-			$uid=$invUser.uid
-		}
-		
-		if ($uid) {	#если UID есть, то используем его чтобы найти другие трудоустройства
-			spooLog "$($user.displayName) is dismissed, searching other employments ($uid)..."
-			$invUser=getInventoryObj 'users' '' @{
-				uid=$uid;
-				expand=$expand;
+		if ((get-date $invUser.resign_date) -lt (get-date)) {
+			$uid='';
+			#если UID проставлен в АД - берем оттуда, иначе из инвентори
+			if ($user.adminDescription) {
+				$uid=$user.adminDescription
+			} elseif ($invUser.uid) {
+				$uid=$invUser.uid
 			}
-		} else {	#иначе ищем по ФИО (что хуже, т.к. не исключает полных однофамильцев
-			spooLog "$($user.displayName) is dismissed, searching other employments by Full Name..."
-			$invUser=getInventoryObj 'users' '' @{
-				name=$user.displayName;
-				expand=$expand;
-			}			
+		
+			if ($uid) {	#если UID есть, то используем его чтобы найти другие трудоустройства
+				spooLog "$($user.displayName) is dismissed, searching other employments ($uid)..."
+				$invUser=getInventoryObj 'users' '' @{
+					uid=$uid;
+					expand=$expand;
+				}
+			} else {	#иначе ищем по ФИО (что хуже, т.к. не исключает полных однофамильцев
+				spooLog "$($user.displayName) is dismissed, searching other employments by Full Name..."
+				$invUser=getInventoryObj 'users' '' @{
+					name=$user.displayName;
+					expand=$expand;
+				}			
+			}
+		} else {
+			#отменяем увольнение, если дата еще не наступила
+			$invUser.Uvolen = 0
+			warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] - to be dismissed @ "+$invUser.resign_date)
 		}
-	}
+	} 
 
 	#Если все-таки не нашли
 	if ($invUser -isnot [PSCustomObject]) {
@@ -177,9 +182,7 @@ function ParseUser() {
 			if ($auto_dismiss) {
 				spooLog($user.sAMAccountname+ ": user dissmissed! Deactivating")
 				if ($dismiss_script) {
-					powershell.exe -noprofile -executionpolicy bypass -file "$dismiss_script" $user.sAMAccountname
-					# не позволяет использовать *.ps1-скрипты
-					# Start-Process -FilePath $dismiss_script -ArgumentList $user.sAMAccountname -NoNewWindow
+					Start-Process -FilePath $dismiss_script -ArgumentList $user.sAMAccountname -NoNewWindow
 				} else {
 					DisableADUser($user)
 				}
@@ -427,4 +430,3 @@ if ($args.Length -gt 0) {
 		}
 	}
 }
-
