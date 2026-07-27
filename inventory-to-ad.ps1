@@ -26,6 +26,15 @@
 . "$($PSScriptRoot)\..\libs.ps1\lib_inventory.ps1"
 . "$($PSScriptRoot)\..\libs.ps1\lib_usr_ad.ps1"
 
+#связи, которые нужно подтягивать вместе с кадровой записью
+$inventory_user_expand='ln,mn,fn,orgStruct,org'
+
+#приоритетная организация по умолчанию (может переопределяться поэлементно в $inventory2ad_sync)
+$stickyOrgDefault=$stickyOrg
+
+#кадровая запись, с которой учетка была перепривязана на этом прогоне ($false - перепривязки не было)
+$global:userRebindFrom=$false
+
 
 #запись данных о пользователе в БД
 function pushUserData() {
@@ -47,8 +56,93 @@ function pushUserData() {
 	}
 }
 
-#загрузить пользователя из Инвентаризации через REST API
-function FindUser() {
+#разбирает дату из инвентаризации в [datetime]
+#возвращает $null если даты нет или она не в формате $inventory_dateformat
+function parseInventoryDate() {
+	param
+	(
+		[string]$value
+	)
+	if ($value.Length -eq 0) {return $null}
+	try {
+		return [datetime]::parseexact($value, $inventory_dateformat, $null)
+	} catch {
+		debugLog("cant parse date [$value] with format [$inventory_dateformat]")
+		return $null
+	}
+}
+
+#действующее ли трудоустройство:
+#либо не помечено уволенным, либо дата увольнения еще не наступила
+function isActiveEmployment() {
+	param
+	(
+		[object]$employment
+	)
+	if ($employment.Uvolen -ne "1") {return $true}
+	$resign_date=parseInventoryDate $employment.resign_date
+	#уволен без даты увольнения - считаем что уже уволен
+	if ($null -eq $resign_date) {return $false}
+	return ((Get-Date) -lt $resign_date)
+}
+
+#относится ли трудоустройство к приоритетной организации ($stickyOrg)
+#$stickyOrg можно задавать как ID организации, так и ее именем
+function isStickyOrgEmployment() {
+	param
+	(
+		[object]$employment
+	)
+	if ( -not $stickyOrg) {return $false}
+	if ("$stickyOrg" -match '^\d+$') {
+		return ([string]$employment.org_id -eq [string]$stickyOrg)
+	}
+	return (
+		([string]$employment.org.uname -eq [string]$stickyOrg) -or
+		([string]$employment.org.name -eq [string]$stickyOrg)
+	)
+}
+
+#запрашивает ВСЕ кадровые записи, подходящие под фильтр (в отличие от search, отдающего одну)
+function FetchEmployments() {
+	param
+	(
+		[hashtable]$filter
+	)
+	$filter['expand']=$inventory_user_expand
+	$filter['per-page']=100
+	$employments=callInventoryRestMethod 'GET' 'users' 'filter' $filter
+	#404/ошибка запроса приезжают как $false, пустой список - как $null
+	if (($null -eq $employments) -or ($employments -is [bool])) {return @()}
+	return @($employments)
+}
+
+#выбирает из списка трудоустройств приоритетное:
+#действующее > в приоритетной организации > позднее уволенное > лучший тип трудоустройства (Persg) > более новая запись
+#дата увольнения важна именно среди уволенных: если выбрать запись без даты, скрипт не поймет,
+#что человек уже уволен, и не отключит учетку (у действующих записей этот критерий нейтрален)
+function PickEmployment() {
+	param
+	(
+		$employments
+	)
+	return @($employments | Sort-Object `
+		@{Expression={if (isActiveEmployment $_) {0} else {1}}},
+		@{Expression={if (isStickyOrgEmployment $_) {0} else {1}}},
+		@{Expression={
+			if (isActiveEmployment $_) {0} else {
+				$resign_date=parseInventoryDate $_.resign_date
+				if ($null -eq $resign_date) {0} else {$resign_date.Ticks}
+			}
+		}; Descending=$true},
+		@{Expression={if ("$($_.Persg)" -match '^\d+$') {[int]$_.Persg} else {[int]::MaxValue}}},
+		@{Expression={[int]$_.id}; Descending=$true}
+	)[0]
+}
+
+#последовательный поиск кадровой записи, от которой отталкиваемся при поиске всех трудоустройств
+#возвращает объект записи или $false
+function FindAnchorEmployment() {
 	param
 	(
 		[object]$user
@@ -63,7 +157,7 @@ function FindUser() {
 		$org_id=1
 	}
 
-	$expand='ln,mn,fn,orgStruct,org'
+	$expand=$inventory_user_expand
 	#Ищем пользователя последовательно:
 
 	#Если у нас есть Логин - ищем по Логину - должна быть конкретная запись, т.к. несколько логинов быть не должно
@@ -97,44 +191,120 @@ function FindUser() {
 		expand=$expand;
 	}}
 	
-	#если пользователь уволен, и мы искали его по табельнику и у нас есть его uid, то надо поискать по UID (вдруг другая должность есть)
-	if (($invUser -is [PSCustomObject]) -and ($invUser.Uvolen -eq "1")) {
-		if ((get-date $invUser.resign_date) -lt (get-date)) {
-			$uid='';
-			#если UID проставлен в АД - берем оттуда, иначе из инвентори
-			if ($user.adminDescription) {
-				$uid=$user.adminDescription
-			} elseif ($invUser.uid) {
-				$uid=$invUser.uid
-			}
-		
-			if ($uid) {	#если UID есть, то используем его чтобы найти другие трудоустройства
-				spooLog "$($user.displayName) is dismissed, searching other employments ($uid)..."
-				$invUser=getInventoryObj 'users' '' @{
-					uid=$uid;
-					expand=$expand;
-				}
-			} else {	#иначе ищем по ФИО (что хуже, т.к. не исключает полных однофамильцев
-				spooLog "$($user.displayName) is dismissed, searching other employments by Full Name..."
-				$invUser=getInventoryObj 'users' '' @{
-					name=$user.displayName;
-					expand=$expand;
-				}			
-			}
-		} else {
-			#отменяем увольнение, если дата еще не наступила
-			$invUser.Uvolen = 0
-			warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] - to be dismissed @ "+$invUser.resign_date)
+	if ($invUser -isnot [PSCustomObject]) {return $false}
+
+	return $invUser
+}
+
+#загрузить пользователя из Инвентаризации через REST API
+#у человека может быть несколько трудоустройств (в т.ч. совместительство), поэтому
+#выбираем не первое попавшееся, а приоритетное - и пересматриваем выбор на каждом прогоне,
+#иначе учетка залипает на записи, к которой ее привязали (напр. на совместительстве,
+#подхваченном в выходные между увольнением в пятницу и приемом в понедельник)
+function FindUser() {
+	param
+	(
+		[object]$user
+	)
+
+	#запись, от которой отталкиваемся: она дает нам UID/ФИО человека
+	$anchor=FindAnchorEmployment $user
+
+	#ключ личности: UID записи, иначе UID из АД, иначе ФИО (хуже, т.к. не исключает однофамильцев)
+	#@() обязательно: возврат из функции разворачивает массив из одного элемента в объект,
+	#а у объекта нет .Count - и единственное трудоустройство считалось бы ненайденным
+	$employments=@()
+	if (($anchor -is [PSCustomObject]) -and $anchor.uid) {
+		$employments=@(FetchEmployments @{uid=$anchor.uid})
+	} elseif ($user.adminDescription) {
+		$employments=@(FetchEmployments @{uid=$user.adminDescription})
+	}
+
+	if ( -not $employments.Count) {
+		$name=$user.displayName
+		if (($anchor -is [PSCustomObject]) -and ($anchor.Ename.Length -gt 0)) {$name=$anchor.Ename}
+		if ($name.Length -gt 0) {$employments=@(FetchEmployments @{name=$name})}
+	}
+
+	#подстраховка: запись, найденная по логину/табельному, могла не попасть в выборку
+	#(нет UID, другое написание ФИО) - тогда работаем хотя бы по ней
+	if ($anchor -is [PSCustomObject]) {
+		$anchorListed=$false
+		foreach ($employment in $employments) {
+			if ([string]$employment.id -eq [string]$anchor.id) {$anchorListed=$true}
 		}
-	} 
+		if ( -not $anchorListed) {$employments=@($employments)+@($anchor)}
+	}
 
 	#Если все-таки не нашли
-	if ($invUser -isnot [PSCustomObject]) {
+	if ( -not $employments.Count) {
 		warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] - not found in inventory")
 		return 'error'
 	}
 
+	$invUser=PickEmployment $employments
+
+	if ($employments.Count -gt 1) {
+		debugLog("$($user.sAMAccountname): $($employments.Count) employments found, using #$($invUser.id) (org $($invUser.org_id), num $($invUser.employee_id), Persg $($invUser.Persg))")
+	}
+
+	#переключение учетки на другое трудоустройство - событие заметное, пишем в лог
+	$global:userRebindFrom=$false
+	if (($anchor -is [PSCustomObject]) -and ([string]$anchor.id -ne [string]$invUser.id)) {
+		spooLog($user.sAMAccountname+": re-binding from employment #"+$anchor.id+" (org "+$anchor.org_id+", num "+$anchor.employee_id+") to #"+$invUser.id+" (org "+$invUser.org_id+", num "+$invUser.employee_id+")")
+		$global:userRebindFrom=$anchor
+	}
+
+	#предупреждаем о предстоящем увольнении, если дата еще не наступила
+	if (($invUser.Uvolen -eq "1") -and (isActiveEmployment $invUser)) {
+		warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] - to be dismissed @ "+$invUser.resign_date)
+	}
+
 	return $invUser
+}
+
+#переносит связи и атрибуты (внутренний телефон, техника, ПК, лицензии, доступы, журнал входов)
+#с прежней кадровой записи на ту, к которой теперь привязана учетка: иначе все нажитое остается
+#висеть на старом табельнике
+#статус источника не смотрим: нажитое принадлежит человеку и должно следовать за учеткой.
+#если переносить только с уволенного, то в сценарии "уволен в пятницу - принят в понедельник"
+#данные уедут в выходные на совместительство и обратно в приоритетную организацию уже не вернутся
+#(в самой инвентаризации логика та же: все забирает та запись, на которой оказался логин)
+function MigrateEmployment() {
+	param
+	(
+		[object]$source,
+		[object]$destination
+	)
+	if ($source -isnot [PSCustomObject]) {return}
+	if ([string]$source.id -eq [string]$destination.id) {return}
+
+	if ( -not $write_inventory) {
+		spooLog("invPush: skip migrate employment #$($source.id) -> #$($destination.id) INV: RO mode")
+		return
+	}
+
+	#параметры именно в query string: Yii подставляет в аргументы действия только их, но не тело запроса
+	$result=callInventoryRestMethod 'POST' 'users' "migrate?id=$($source.id)&target=$($destination.id)"
+	if ($result -is [bool]) {
+		warningLog("migration of employment #$($source.id) -> #$($destination.id) failed")
+	} else {
+		spooLog("employment data migrated #$($source.id) -> #$($destination.id)")
+	}
+}
+
+#внутренний номер телефона, привязанный к конкретной кадровой записи ('' если номера нет)
+function FetchEmploymentPhone() {
+	param
+	(
+		$id
+	)
+	$phone=callInventoryRestMethod 'GET' 'phones' 'search-by-user' @{id=$id} $true
+	#404/ошибка запроса приезжают как $false
+	if ($phone -is [bool]) {return ''}
+	$phone=([string]$phone).trim('"')
+	if ($phone -eq 'null') {return ''}
+	return $phone
 }
 
 #обработка пользователя
@@ -159,16 +329,23 @@ function ParseUser() {
 		debugLog($user.sAMAccountname+": Skip: got SAP error")
 		return
 	}
+
+	#учетку перепривязали на другое трудоустройство - утаскиваем туда же все нажитое
+	#(делаем это до чтения телефона, чтобы он читался уже с новой записи)
+	MigrateEmployment $global:userRebindFrom $invUser
 	
 	#проверка увольнения
+	#увольняем только если ни одно трудоустройство человека уже не действует
+	#(приоритетное выбрано в FindUser, действующее всегда бьет уволенное)
 	if ($invUser.Uvolen -eq "1") {
 		#смотрим когда уволен
-		if ($invUser.resign_date.Length -gt 0) {
-			$resign_date=[datetime]::parseexact($invUser.resign_date, $inventory_dateformat, $null)
+		$resign_date=parseInventoryDate $invUser.resign_date
+		if ($null -eq $resign_date) {
+			#без внятной даты увольнения учетку не трогаем
+			warningLog($user.sAMAccountname+": dismissed in inventory (#"+$invUser.id+"), but resign date ["+$invUser.resign_date+"] is empty or not in ["+$inventory_dateformat+"] format - not deactivating")
+		} elseif ((Get-Date) -gt $resign_date) {
 			#уже уволен?
-			if ((Get-Date) -gt $resign_date) {
-				$needDismiss = $true
-			}
+			$needDismiss = $true
 		}
 	}
 	
@@ -333,9 +510,7 @@ function ParseUser() {
 
 	#Внутренний номер телефона
 	#Запрашиваем номер телефона, привязанный к пользователю в Инвентаризации
-	$invUserPh=callInventoryRestMethod 'GET' 'phones' 'search-by-user' @{id=$invUser.id} $true
-	$invUserPh=$invUserPh.trim('"')
-    if ($invUserPh -eq 'null') {$invUserPh=''}
+	$invUserPh=FetchEmploymentPhone $invUser.id
 	#если нужно почистить телефон	
 	if (($invUserPh -eq "") -and ($user.Pager.Length -gt 0)) {
 		spooLog($user.sAMAccountname+": got AD Phone ["+$user.pager+"] instead of ["+$invUserPh+"]")
@@ -415,10 +590,26 @@ Import-Module ActiveDirectory
 
 if ($args.Length -gt 0) {
 	$users = Get-ADUser $args[0] -properties Name,cn,sn,givenName,DisplayName,sAMAccountname,company,department,title,employeeNumber,employeeID,mail,pager,mobile,telephoneNumber,adminDescription
+
+	foreach($user in $users) {
+		#подбираем параметры того OU, в котором лежит учетка (нужны для увольнения и приоритетной организации)
+		$stickyOrg=$stickyOrgDefault
+		foreach ($params in $inventory2ad_sync) {
+			if ($user.DistinguishedName -like "*$($params.u_OUDN)") {
+				$u_OUDN=$params.u_OUDN
+				$f_OUDN=$params.f_OUDN
+				if ($null -ne $params.stickyOrg) {$stickyOrg=$params.stickyOrg}
+			}
+		}
+		ParseUser ($user)
+	}
 } else {
 	foreach ($params in $inventory2ad_sync) {
 		$u_OUDN=$params.u_OUDN
 		$f_OUDN=$params.f_OUDN
+		#приоритетная организация может задаваться на каждый OU отдельно
+		$stickyOrg=$stickyOrgDefault
+		if ($null -ne $params.stickyOrg) {$stickyOrg=$params.stickyOrg}
 		$users = Get-ADUser -Filter {enabled -eq $true} -SearchBase $u_OUDN -properties Name,cn,sn,givenName,DisplayName,sAMAccountname,company,department,title,employeeNumber,employeeID,mail,pager,mobile,telephoneNumber,adminDescription
 		$u_count = $users | measure 
 		Write-Host "Users to sync: " $u_count.Count

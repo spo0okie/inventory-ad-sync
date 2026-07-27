@@ -33,6 +33,20 @@ powershell.exe -noprofile -executionpolicy bypass -file inventory-to-ad.ps1 ivan
 «AD RO mode» / «INV: RO mode»), прогнать одного пользователя, посмотреть diff в логе, затем
 включать запись.
 
+Логику выбора трудоустройства можно гонять и без AD: скрипт целиком запускать нельзя (в конце
+файла сразу идёт `Import-Module ActiveDirectory` и обход OU), поэтому нужные функции вытаскиваются
+из файла по AST и объявляются в тестовой обвязке:
+
+```powershell
+$ast=[System.Management.Automation.Language.Parser]::ParseFile($path,[ref]$null,[ref]$null)
+foreach ($fn in $ast.FindAll({$args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst]},$true)) {
+    if ($wanted -contains $fn.Name) {Invoke-Expression $fn.Extent.Text}
+}
+```
+
+Сама обвязка должна быть **на ASCII**: Windows PowerShell 5.1 читает `.ps1` без BOM как ANSI, и
+кириллица в тестовом файле ломает не только вывод, но и разбор строк.
+
 ## Внешние зависимости и раскладка на диске
 
 Скрипт делает dot-source по путям `$PSScriptRoot\..\`, поэтому репозиторий обязан лежать
@@ -62,10 +76,10 @@ powershell.exe -noprofile -executionpolicy bypass -file inventory-to-ad.ps1 ivan
 
 ### Конфиг
 
-Из `config.priv.ps1` скрипт использует: `$inventory2ad_sync`, `$write_ad`, `$auto_dismiss`,
-`$auto_dismiss_exclude`, `$dismiss_script`, `$multiorg_support`, `$exchange_domains`,
-`$inventory_dateformat`, `$write_inventory`, `$logfile`, `$inventory_RESTapi_URL`,
-`$inventory_user_login` / `$inventory_user_password`.
+Из `config.priv.ps1` скрипт использует: `$inventory2ad_sync`, `$stickyOrg`, `$write_ad`,
+`$auto_dismiss`, `$auto_dismiss_exclude`, `$dismiss_script`, `$multiorg_support`,
+`$exchange_domains`, `$inventory_dateformat`, `$write_inventory`, `$logfile`,
+`$inventory_RESTapi_URL`, `$inventory_user_login` / `$inventory_user_password`.
 
 Массовый режим ходит по `$inventory2ad_sync` — это **массив хэшей**, по одному на OU:
 
@@ -74,6 +88,11 @@ $inventory2ad_sync=@(
     @{u_OUDN="OU=Пользователи,DC=domain,DC=local"; f_OUDN="OU=Уволенные,DC=domain,DC=local"}
 )
 ```
+
+`$stickyOrg` (ID организации или её имя) — приоритетная организация при множественном
+трудоустройстве; можно переопределить в элементе `$inventory2ad_sync` ключом `stickyOrg`.
+Глобальное значение сохраняется в `$stickyOrgDefault` при старте, потому что переменная
+переопределяется в цикле по OU.
 
 Полный пример конфига — в [README.md](README.md). Если `$inventory2ad_sync` не определён, `foreach`
 просто не сделает ни одной итерации и скрипт молча завершится, ничего не синхронизировав, —
@@ -85,23 +104,53 @@ $inventory2ad_sync=@(
 `Get-ADUser -Filter {enabled -eq $true} -SearchBase $u_OUDN` по каждому элементу
 `$inventory2ad_sync`. Каждый объект уходит в `ParseUser`.
 
-`FindUser` ищет пользователя в инвентаризации строго по очереди, первое совпадение выигрывает:
+У человека может быть несколько кадровых записей (трудоустройств), и связь учётки AD с конкретной
+записью пересматривается **на каждом прогоне** — иначе учётка залипает: при переводе (увольнение в
+пятницу, приём в понедельник) субботний прогон перепривязывает её к совместительству в другой
+организации, а понедельничный уже не возвращает обратно, т.к. по логину находит совместительство.
+
+`FindUser` работает в два шага.
+
+**Шаг 1 — якорь** (`FindAnchorEmployment`): последовательный поиск, первое совпадение выигрывает —
+нужен, чтобы узнать UID/ФИО человека:
 
 1. `login` = `sAMAccountName` (уникален),
 2. `num` + `org` = `employeeID` + `employeeNumber` (пара уникальна),
-3. `uid` = `adminDescription` (ИНН/СНИЛС; может найтись несколько — приоритет расставляет сама
-   инвентаризация),
+3. `uid` = `adminDescription` (ИНН/СНИЛС),
 4. `name` = `displayName`,
 5. `num` = `displayName` (для сквозной нумерации табельных — табельный вместо ФИО).
 
+**Шаг 2 — все трудоустройства** (`FetchEmployments` → `GET /users/filter`, в отличие от `search`
+отдаёт список): по `uid` якоря, иначе по `uid` из AD, иначе по ФИО (хуже: не отсекает
+однофамильцев). Якорь, не попавший в выборку, добавляется в список отдельно. Дальше
+`PickEmployment` сортирует кандидатов: **действующее** > **в `$stickyOrg`** > **позднее уволенное**
+> **меньший `Persg`** (тип трудоустройства) > **больший id**. Весь список сохраняется в
+`$global:userEmployments` — он нужен `FetchUserPhone`.
+
 Все запросы идут с `expand=ln,mn,fn,orgStruct,org`. Не нашли — `warningLog` и возврат строки
 `'error'`, которую `ParseUser` сравнивает как `$invUser -eq "error"` и пропускает пользователя.
+Смена привязки логируется строкой `re-binding from employment #X to #Y`, а прежняя запись остаётся
+в `$global:userRebindFrom` — по ней работает `MigrateEmployment`.
 
-Обработка увольнения (самая нетривиальная часть):
-- Если найденная запись помечена `Uvolen=1`, но `resign_date` **ещё не наступила** — увольнение
-  отменяется прямо в объекте (`$invUser.Uvolen = 0`) и пишется предупреждение.
-- Если дата уже прошла — ищутся другие трудоустройства: по `uid` (из AD `adminDescription`, иначе
-  из инвентаризации), а при отсутствии `uid` — по ФИО (хуже: не отсекает однофамильцев).
+**Перенос нажитого** (`MigrateEmployment`, вызывается в начале `ParseUser` — до чтения телефона):
+всё, что накопилось на прежней кадровой записи (внутренний телефон, техника, ПК, лицензии,
+доступы, журнал входов), уезжает на новую через `POST /users/migrate?id=<источник>&target=<приёмник>`.
+Параметры именно в query string — Yii подставляет в аргументы действия только их, тело POST не
+биндится. Статус источника не проверяется намеренно: если переносить только с уволенного, то в
+сценарии «уволен в пятницу — принят в понедельник» данные уедут в выходные на совместительство и
+обратно в приоритетную организацию уже не вернутся. В самой инвентаризации логика та же — всё
+забирает запись, на которой оказался логин. Метод появился в arms
+(`modules/api/controllers/UsersController::actionMigrate`) — на старой инвентаризации вернётся 404,
+скрипт это переживёт (`warningLog`) и продолжит.
+
+Обработка увольнения:
+- «Действующим» (`isActiveEmployment`) считается трудоустройство без `Uvolen=1` **либо** с
+  `resign_date` в будущем — такое всегда выигрывает у уволенного, поэтому отдельной отмены
+  увольнения не требуется, пишется только предупреждение `to be dismissed @ дата`.
+- Среди уволенных приоритет у записи с более поздней `resign_date`: запись без даты (или с датой не
+  в формате `$inventory_dateformat`) не даёт `ParseUser` понять, что человек уволен, и учётка
+  осталась бы включённой. Это не молчаливое поведение: `ParseUser` пишет `warningLog ... not
+  deactivating`.
 - Реальное увольнение в `ParseUser` делается только при `$auto_dismiss`, при этом
   `$auto_dismiss_exclude` проверяется всегда (даже с выключенным `$auto_dismiss` — тогда просто
   пишется «Deactivation needed!»). Если задан `$dismiss_script`, вызывается он с логином в
@@ -122,7 +171,7 @@ $inventory2ad_sync=@(
 | `employeeID` | `employee_id` | табельный номер |
 | `employeeNumber` | `org_id` | только при `$multiorg_support` |
 | `mobile` | `Mobile` | через `correctPhonesList` |
-| `pager` | `GET /phones/search-by-user` (raw) | внутренний номер, отдельный запрос |
+| `pager` | `GET /phones/search-by-user` (raw) | внутренний номер, отдельный запрос по id кадровой записи |
 | `telephoneNumber` | — | из инвентаризации не берётся, только нормализуется формат |
 | `mail` | `Email` | направление зависит от домена: см. ниже |
 | `sAMAccountName` | `Login` | **AD -> инвентаризация** |
@@ -154,6 +203,12 @@ $inventory2ad_sync=@(
   консоль, и в `$global:logfile`. `user.log` в `.gitignore`, коммитить его не надо.
 - Проверка «поле не пустое» — всегда `.Length -gt 0`, а не `-gt 0`: у строки сравнение с числом
   даёт строковое сравнение с `"0"` и работает случайно.
+- **Результат функции, возвращающей список, обязательно оборачивать в `@()` на стороне вызова**:
+  PowerShell разворачивает массив из одного элемента в объект, а у `PSCustomObject` нет `.Count`
+  (возвращает пусто, `-not $x.Count` → `$true`). На этом единственное трудоустройство человека
+  считалось «не найдено».
+- Ответы REST-клиента: ошибка/404 приезжают как `$false`, пустой список — как `$null`/пустой
+  массив. Оба случая надо проверять до обращения к полям (`$x -is [bool]`).
 - Ограничения схемы AD, о которых напоминает шапка скрипта: `mobile` — 64, `title` — 128,
   `department` — 64. Проверить лимит атрибута:
   `dsquery * "cn=Schema,cn=Configuration,dc=Domain,dc=local" -Filter "(LDAPDisplayName=mobile)" -attr rangeUpper`.
