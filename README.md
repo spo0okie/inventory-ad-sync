@@ -22,10 +22,16 @@
 ```powershell
 #домен организации
 $domain="domain.local"
-#подразделение где хранятся пользователи
-$u_OUDN="OU=Пользователи,DC=domain,DC=local"
-#подразделение куда увольняются пользователи
-$f_OUDN="OU=Уволенные,DC=domain,DC=local"
+
+#пары подразделений для синхронизации: где брать пользователей (u_OUDN)
+#и куда переносить уволенных (f_OUDN). Обрабатываются все пары по очереди
+$inventory2ad_sync=@(
+	@{
+		u_OUDN="OU=Пользователи,DC=domain,DC=local";
+		f_OUDN="OU=Уволенные,DC=domain,DC=local";
+	}
+)
+
 #писать ли изменения в АД?
 $write_ad=$false
 #разрешить автоматическое увольнение при синхронизации
@@ -39,17 +45,26 @@ $auto_dismiss_exclude=@(
 	'lenin.v'
 )
 
+#почтовые домены Exchange: для адресов в этих доменах источником считается АД,
+#и почта синхронизируется в обратную сторону (АД -> БД инвентаризации)
+$exchange_domains=@(
+	'domain.local'
+)
+
 #URL сервиса запросов в таблицу пользователей САП
 $inventory_RESTapi_URL="http://inventory.domain.local/web/api"
+#учетка для Basic-авторизации в REST API
+$inventory_user_login="inventory_ad_sync"
+$inventory_user_password="password"
 #поддержка нескольких организаций
 $multiorg_support=$false
 #формат даты (приема, увольнения, др) в САП
-$dateformat_SAP='yyyy-MM-dd'
+$inventory_dateformat='yyyy-MM-dd'
 #писать ли изменения в БД инвентаризации
 $write_inventory=$false
 
 #логфайл синхронизации
-$sync_logfile="C:\Joker\Works\PS\user_management\SAPsync\log\user_sync.log"
+$logfile="C:\Joker\Works\PS\user_management\SAPsync\log\user_sync.log"
 ```
 
 

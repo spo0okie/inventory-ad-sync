@@ -56,7 +56,7 @@ function FindUser() {
 
 	#Если у нас есть только табельный - считаем что организация=1
 	$org_id=$user.employeeNumber
-	if (($org_id.Length -eq 0) -or ( -not $mutiorg_support)) {
+	if (($org_id.Length -eq 0) -or ( -not $multiorg_support)) {
 		#если организация не заявлена, то первая
 		#эта ситуация скорее всего возникнет при переходе от инвентаризации версии под одну организацию
 		#к инвентаризации версии под множество. Когда БД уже с учетом организаций а АД еще нет
@@ -277,7 +277,7 @@ function ParseUser() {
 		$title=$title.Substring(0,128)
 	}
 	if (
-		($title -gt 0) -and
+		($title.Length -gt 0) -and
 		($user.title -ne $title)
 	){
 		spooLog($user.sAMAccountname+": got AD Title ["+$user.title+"] instead of ["+$title+"]")
