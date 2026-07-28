@@ -86,21 +86,114 @@ function isActiveEmployment() {
 	return ((Get-Date) -lt $resign_date)
 }
 
+#относится ли трудоустройство к указанной организации
+#организацию можно задавать как ID, так и именем (юр. названием или брендом)
+function isOrgEmployment() {
+	param
+	(
+		[object]$employment,
+		$org
+	)
+	if ( -not $org) {return $false}
+	if ("$org" -match '^\d+$') {
+		return ([string]$employment.org_id -eq [string]$org)
+	}
+	return (
+		([string]$employment.org.uname -eq [string]$org) -or
+		([string]$employment.org.name -eq [string]$org)
+	)
+}
+
 #относится ли трудоустройство к приоритетной организации ($stickyOrg)
-#$stickyOrg можно задавать как ID организации, так и ее именем
 function isStickyOrgEmployment() {
 	param
 	(
 		[object]$employment
 	)
-	if ( -not $stickyOrg) {return $false}
-	if ("$stickyOrg" -match '^\d+$') {
-		return ([string]$employment.org_id -eq [string]$stickyOrg)
-	}
-	return (
-		([string]$employment.org.uname -eq [string]$stickyOrg) -or
-		([string]$employment.org.name -eq [string]$stickyOrg)
+	return (isOrgEmployment $employment $stickyOrg)
+}
+
+#приводит $affiliatedOrgs к списку групп
+#PowerShell разворачивает @( @(1,2) ) обратно в плоский @(1,2), поэтому единственная группа
+#приезжает сюда просто списком организаций - собираем такие одиночные элементы в одну группу
+#(иначе каждая организация оказалась бы сама по себе и перепривязка встала бы совсем)
+function NormalizeOrgGroups() {
+	param
+	(
+		$groups
 	)
+	$result=@()
+	$loose=@()
+	foreach ($group in $groups) {
+		if ($group -is [array]) {
+			$result+=,@($group)
+		} else {
+			$loose+=$group
+		}
+	}
+	if ($loose.Count) {$result+=,@($loose)}
+
+	#запятая не дает развернуть единственную группу обратно в плоский список
+	return ,$result
+}
+
+#группа аффилированных организаций ($affiliatedOrgs), в которую входит трудоустройство
+#$false - организация не состоит ни в одной группе
+function AffiliatedOrgGroup() {
+	param
+	(
+		[object]$employment
+	)
+	foreach ($group in $affiliatedOrgs) {
+		foreach ($org in $group) {
+			if (isOrgEmployment $employment $org) {return $group}
+		}
+	}
+	return $false
+}
+
+#допустимо ли перевести учетку с трудоустройства $from на трудоустройство $to:
+#внутри одной организации - всегда, между разными - только внутри группы аффилированных
+#(организация вне групп сама по себе: за ее пределы учетку не уводим)
+function CanRebindEmployment() {
+	param
+	(
+		[object]$from,
+		[object]$to
+	)
+	if ([string]$from.org_id -eq [string]$to.org_id) {return $true}
+
+	$group=AffiliatedOrgGroup $from
+	if ( -not $group) {return $false}
+
+	foreach ($org in $group) {
+		if (isOrgEmployment $to $org) {return $true}
+	}
+	return $false
+}
+
+#выкидывает из списка трудоустройства, на которые учетку переводить нельзя:
+#организация должна быть той же самой либо аффилированной с текущей
+function SelectRebindableEmployments() {
+	param
+	(
+		$employments,
+		[object]$current
+	)
+	if ($current -isnot [PSCustomObject]) {return @($employments)}
+
+	$allowed=@()
+	foreach ($employment in $employments) {
+		if (([string]$employment.id -eq [string]$current.id) -or (CanRebindEmployment $current $employment)) {
+			$allowed+=$employment
+		} else {
+			debugLog("employment #$($employment.id) (org $($employment.org_id)) is not affiliated with org $($current.org_id), skipped")
+		}
+	}
+
+	if ( -not $allowed.Count) {return @($employments)}
+
+	return @($allowed)
 }
 
 #запрашивает ВСЕ кадровые записи, подходящие под фильтр (в отличие от search, отдающего одну)
@@ -117,14 +210,74 @@ function FetchEmployments() {
 	return @($employments)
 }
 
+#выкидывает из списка трудоустройства, занятые другой учеткой АД: у человека бывает несколько
+#логинов (напр. по одному на организацию), и каждый должен держаться своего трудоустройства,
+#иначе обе учетки сойдутся на одной кадровой записи и начнут отнимать ее друг у друга
+#запись без логина ничья - на нее претендовать можно
+function SelectOwnEmployments() {
+	param
+	(
+		$employments,
+		[string]$login
+	)
+	$own=@()
+	foreach ($employment in $employments) {
+		$employmentLogin=[string]$employment.Login
+		if (($employmentLogin.Length -eq 0) -or ($employmentLogin -eq $login)) {
+			$own+=$employment
+		} else {
+			debugLog("$($login): employment #$($employment.id) belongs to [$employmentLogin], skipped")
+		}
+	}
+
+	#все записи человека заняты другими учетками - выбирать не из чего, работаем как нашли
+	if ( -not $own.Count) {
+		debugLog("$($login): all employments belong to other AD accounts")
+		return @($employments)
+	}
+
+	return @($own)
+}
+
+#оставляет только те трудоустройства, на которые учетку вообще можно переключить:
+#уволенная запись целью переключения не является - приоритетной может быть только действующая
+#текущая привязка остается в списке всегда: если переключаться некуда, синхронизируемся с ней
+#(и увольняем учетку), но с уволенной на уволенную не прыгаем
+function SelectSwitchTargets() {
+	param
+	(
+		$employments,
+		[object]$current
+	)
+	$targets=@()
+	foreach ($employment in $employments) {
+		$isCurrent=(($current -is [PSCustomObject]) -and ([string]$employment.id -eq [string]$current.id))
+		if (($employment.Uvolen -ne "1") -or $isCurrent) {
+			$targets+=$employment
+		} else {
+			debugLog("employment #$($employment.id) is dismissed, not a switch target")
+		}
+	}
+
+	#ни текущей привязки, ни действующих записей - выбираем из того, что есть
+	if ( -not $targets.Count) {return @($employments)}
+
+	return @($targets)
+}
+
 #выбирает из списка трудоустройств приоритетное:
-#действующее > в приоритетной организации > позднее уволенное > лучший тип трудоустройства (Persg) > более новая запись
+#действующее > в приоритетной организации > позднее уволенное > лучший тип трудоустройства (Persg) >
+#текущая привязка > более новая запись
 #дата увольнения важна именно среди уволенных: если выбрать запись без даты, скрипт не поймет,
 #что человек уже уволен, и не отключит учетку (у действующих записей этот критерий нейтрален)
+#текущая привязка ($current) выигрывает при равенстве по существу: перецепляемся, только если
+#новая запись реально лучше (стала действующей, приоритетная организация, лучший тип трудоустройства),
+#а не просто моложе - иначе получаем бессмысленные переключения между равнозначными записями
 function PickEmployment() {
 	param
 	(
-		$employments
+		$employments,
+		$current=$null
 	)
 	return @($employments | Sort-Object `
 		@{Expression={if (isActiveEmployment $_) {0} else {1}}},
@@ -136,6 +289,7 @@ function PickEmployment() {
 			}
 		}; Descending=$true},
 		@{Expression={if ("$($_.Persg)" -match '^\d+$') {[int]$_.Persg} else {[int]::MaxValue}}},
+		@{Expression={if (($current -is [PSCustomObject]) -and ([string]$_.id -eq [string]$current.id)) {0} else {1}}},
 		@{Expression={[int]$_.id}; Descending=$true}
 	)[0]
 }
@@ -242,7 +396,11 @@ function FindUser() {
 		return 'error'
 	}
 
-	$invUser=PickEmployment $employments
+	$employments=@(SelectOwnEmployments $employments $user.sAMAccountname)
+	$employments=@(SelectRebindableEmployments $employments $anchor)
+	$employments=@(SelectSwitchTargets $employments $anchor)
+
+	$invUser=PickEmployment $employments $anchor
 
 	if ($employments.Count -gt 1) {
 		debugLog("$($user.sAMAccountname): $($employments.Count) employments found, using #$($invUser.id) (org $($invUser.org_id), num $($invUser.employee_id), Persg $($invUser.Persg))")
@@ -587,6 +745,10 @@ function ParseUser() {
 }
 
 Import-Module ActiveDirectory
+
+#группы аффилированных организаций: не заданы - каждая организация сама по себе,
+#учетка ходит только между трудоустройствами внутри своей организации
+$affiliatedOrgs=NormalizeOrgGroups $affiliatedOrgs
 
 if ($args.Length -gt 0) {
 	$users = Get-ADUser $args[0] -properties Name,cn,sn,givenName,DisplayName,sAMAccountname,company,department,title,employeeNumber,employeeID,mail,pager,mobile,telephoneNumber,adminDescription
