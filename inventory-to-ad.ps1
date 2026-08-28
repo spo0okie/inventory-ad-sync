@@ -21,6 +21,10 @@
 #title (128)
 #department (64)
 
+#Windows PowerShell 5.1 по умолчанию предлагает серверу только SSL3/TLS1.0 -
+#без TLS1.2 все REST-запросы к инвентаризации падают с ошибкой создания защищенного канала
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 . "$($PSScriptRoot)\..\config.priv.ps1"
 . "$($PSScriptRoot)\..\libs.ps1\lib_funcs.ps1"
 . "$($PSScriptRoot)\..\libs.ps1\lib_inventory.ps1"
@@ -294,6 +298,21 @@ function PickEmployment() {
 	)[0]
 }
 
+#ФИО пользователя так, как оно записано в АД
+#обычно это displayName, но учетку могли завести скриптом (New-ADUser -Name ... без -DisplayName)
+#и тогда имя есть только в самом объекте - иначе поиск по ФИО и по табельнику вместо ФИО
+#не отработает вообще, и учетка навсегда останется "не найденной"
+function ADUserName() {
+	param
+	(
+		[object]$user
+	)
+	foreach ($value in @($user.displayName,$user.name,$user.cn)) {
+		if (([string]$value).Length -gt 0) {return [string]$value}
+	}
+	return ''
+}
+
 #последовательный поиск кадровой записи, от которой отталкиваемся при поиске всех трудоустройств
 #возвращает объект записи или $false
 function FindAnchorEmployment() {
@@ -301,6 +320,8 @@ function FindAnchorEmployment() {
 	(
 		[object]$user
 	)
+
+	$adName=ADUserName $user
 
 	#Если у нас есть только табельный - считаем что организация=1
 	$org_id=$user.employeeNumber
@@ -334,14 +355,16 @@ function FindAnchorEmployment() {
 	}}
 
 	#Если у нас есть ФИО - ищем по ФИО - тут тоже несколько и тоже лучший
-	if (($invUser -isnot [PSCustomObject]) -and ($user.displayName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
-		name=$user.displayName;
+	if (($invUser -isnot [PSCustomObject]) -and ($adName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
+		name=$adName;
 		expand=$expand;
 	}}
-	
-	#Последний сценарий - табельник вместо ФИО - тут по идее должен находиться один, т.к. такой механизм нужно применять только при сквозной нумерации табельников
-	if (($invUser -isnot [PSCustomObject]) -and ($user.displayName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
-		num=$user.displayName;
+
+	#Последний сценарий - табельник вместо ФИО: учетку завели новому сотруднику, вписав в имя
+	#табельный номер, а ФИО подтянется из инвентаризации на первой же синхронизации
+	#(находиться должен один, т.к. так делают только при сквозной нумерации табельных)
+	if (($invUser -isnot [PSCustomObject]) -and ($adName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
+		num=$adName;
 		expand=$expand;
 	}}
 	
@@ -375,7 +398,7 @@ function FindUser() {
 	}
 
 	if ( -not $employments.Count) {
-		$name=$user.displayName
+		$name=ADUserName $user
 		if (($anchor -is [PSCustomObject]) -and ($anchor.Ename.Length -gt 0)) {$name=$anchor.Ename}
 		if ($name.Length -gt 0) {$employments=@(FetchEmployments @{name=$name})}
 	}
@@ -392,7 +415,7 @@ function FindUser() {
 
 	#Если все-таки не нашли
 	if ( -not $employments.Count) {
-		warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] - not found in inventory")
+		warningLog("user ["+$user.sAMAccountname+"] with Name ["+(ADUserName $user)+"] - not found in inventory (searched by login, num, uid and name)")
 		return 'error'
 	}
 
