@@ -26,9 +26,14 @@
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 . "$($PSScriptRoot)\..\config.priv.ps1"
-. "$($PSScriptRoot)\..\libs.ps1\lib_funcs.ps1"
-. "$($PSScriptRoot)\..\libs.ps1\lib_inventory.ps1"
-. "$($PSScriptRoot)\..\libs.ps1\lib_usr_ad.ps1"
+#путь к библиотекам можно переопределить в конфиге ($libs_path), чтобы держать их в одном месте,
+#а не копировать рядом с каждым скриптом
+if (-not $libs_path) {$libs_path="$($PSScriptRoot)\..\libs.ps1"}
+$libs_path=$libs_path.TrimEnd('\')
+
+. "$($libs_path)\lib_funcs.ps1"
+. "$($libs_path)\lib_inventory.ps1"
+. "$($libs_path)\lib_usr_ad.ps1"
 
 #связи, которые нужно подтягивать вместе с кадровой записью
 $inventory_user_expand='ln,mn,fn,orgStruct,org'
