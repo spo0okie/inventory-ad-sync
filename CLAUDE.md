@@ -51,13 +51,17 @@ foreach ($fn in $ast.FindAll({$args[0] -is [System.Management.Automation.Languag
 
 ## Внешние зависимости и раскладка на диске
 
-Скрипт делает dot-source по путям `$PSScriptRoot\..\`, поэтому репозиторий обязан лежать
-подпапкой рядом с конфигом и библиотеками:
+Конфиг ищется строго по `$PSScriptRoot\..\config.priv.ps1`, поэтому репозиторий обязан лежать
+подпапкой рядом с ним. Библиотеки по умолчанию берутся оттуда же (`$PSScriptRoot\..\libs.ps1\`),
+но путь к ним можно переопределить в конфиге переменной `$libs_path` — чтобы держать `ps1.libs`
+в одном месте, а не копировать рядом с каждым скриптом. Оба скрипта после dot-source конфига
+делают `if (-not $libs_path) {$libs_path="$($PSScriptRoot)\..\libs.ps1"}` и подчищают хвостовой
+слэш; дальше все `. "$($libs_path)\lib_*.ps1"`. Раскладка по умолчанию:
 
 ```
 <рабочая папка>/
   config.priv.ps1          # НЕ в репозитории: креды, OUDN, флаги, путь к логу
-  libs.ps1/                # отдельный репозиторий spo0okie/ps1.libs
+  libs.ps1/                # отдельный репозиторий spo0okie/ps1.libs (перекрывается $libs_path)
     lib_funcs.ps1          # spooLog / errorLog / warningLog / debugLog, correctMobile, correctPhonesList
     lib_inventory.ps1      # REST-клиент к инвентаризации (Basic-auth)
     lib_usr_ad.ps1         # DisableADUser, PrepareOU, CreateADUser
@@ -78,7 +82,8 @@ foreach ($fn in $ast.FindAll({$args[0] -is [System.Management.Automation.Languag
 
 ### Конфиг
 
-Из `config.priv.ps1` скрипт использует: `$inventory2ad_sync`, `$stickyOrg`, `$write_ad`,
+Из `config.priv.ps1` скрипт использует: `$libs_path` (опционально), `$inventory2ad_sync`,
+`$stickyOrg`, `$write_ad`,
 `$auto_dismiss`, `$auto_dismiss_exclude`, `$dismiss_script`, `$multiorg_support`,
 `$exchange_domains`, `$inventory_dateformat`, `$write_inventory`, `$logfile`,
 `$inventory_RESTapi_URL`, `$inventory_user_login` / `$inventory_user_password`.

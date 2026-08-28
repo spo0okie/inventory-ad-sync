@@ -144,6 +144,10 @@ $inventory_dateformat='yyyy-MM-dd'
 #писать ли изменения в БД инвентаризации
 $write_inventory=$false
 
+#путь к библиотекам (spo0okie/ps1.libs); можно не задавать -
+#тогда используется $PSScriptRoot\..\libs.ps1 рядом со скриптом
+$libs_path="C:\Joker\Works\PS\libs.ps1"
+
 #OU с компьютерами и сервисы, в которые их надо добавлять (для comps-to-services.ps1)
 #service задается ID сервиса или его именем, можно списком - тогда машина попадет во все
 $comps2services_sync=@(
