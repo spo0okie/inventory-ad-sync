@@ -359,7 +359,7 @@ function FindAnchorEmployment() {
 
 	#Если у нас есть ФИО - ищем по ФИО - тут тоже несколько и тоже лучший
 	foreach ($candidate in $namesToTry) {
-		if (($invUser -isnot [PSCustomObject]) -and ($user.displayName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
+		if ($invUser -isnot [PSCustomObject]) {$invUser=getInventoryObj 'users' '' @{
 			name=$candidate;
 			expand=$expand;
 		}}
@@ -370,10 +370,11 @@ function FindAnchorEmployment() {
 	#табельный номер, а ФИО подтянется из инвентаризации на первой же синхронизации
 	#(находиться должен один, т.к. так делают только при сквозной нумерации табельных)
 	foreach ($candidate in $namesToTry) {
-		if (($invUser -isnot [PSCustomObject]) -and ($adName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
+		if ($invUser -isnot [PSCustomObject]) {$invUser=getInventoryObj 'users' '' @{
 			num=$candidate;
 			expand=$expand;
 		}}
+		if ($invUser -is [PSCustomObject]) {break}
 	}
 
 	if ($invUser -isnot [PSCustomObject]) {return $false}
@@ -420,7 +421,7 @@ function FindUser() {
 
 	#Если все-таки не нашли
 	if ( -not $employments.Count) {
-		warningLog("user ["+$user.sAMAccountname+"] with Name ["+(ADUserName $user)+"] - not found in inventory (searched by login, num, uid and name)")
+		warningLog("user ["+$user.sAMAccountname+"] with Name ["+($user.displayName)+"] - not found in inventory (searched by login, num, uid and name)")
 		return 'error'
 	}
 
