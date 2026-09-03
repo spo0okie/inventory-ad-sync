@@ -11,7 +11,7 @@
 # - Должность
 # - Подразделение
 # - Организация
-# 
+#
 
 #как посмотреть лимит на длину поля? например для mobile вот так:
 #dsquery * "cn=Schema,cn=Configuration,dc=yamalgazprom,dc=local" -Filter "(LDAPDisplayName=mobile)" -attr rangeUpper
@@ -303,21 +303,6 @@ function PickEmployment() {
 	)[0]
 }
 
-#ФИО пользователя так, как оно записано в АД
-#обычно это displayName, но учетку могли завести скриптом (New-ADUser -Name ... без -DisplayName)
-#и тогда имя есть только в самом объекте - иначе поиск по ФИО и по табельнику вместо ФИО
-#не отработает вообще, и учетка навсегда останется "не найденной"
-function ADUserName() {
-	param
-	(
-		[object]$user
-	)
-	foreach ($value in @($user.displayName,$user.name,$user.cn)) {
-		if (([string]$value).Length -gt 0) {return [string]$value}
-	}
-	return ''
-}
-
 #последовательный поиск кадровой записи, от которой отталкиваемся при поиске всех трудоустройств
 #возвращает объект записи или $false
 function FindAnchorEmployment() {
@@ -325,8 +310,6 @@ function FindAnchorEmployment() {
 	(
 		[object]$user
 	)
-
-	$adName=ADUserName $user
 
 	#Если у нас есть только табельный - считаем что организация=1
 	$org_id=$user.employeeNumber
@@ -352,27 +335,47 @@ function FindAnchorEmployment() {
 		org=$org_id;
 		expand=$expand;
 	}}
-	
+
 	#Если у нас есть ИНН ищем по нему - тут может найтись несколько и выбирается приоритетная сортировка в самой инвентори (лучший тип трудоустройства и не уволен)
 	if (($invUser -isnot [PSCustomObject]) -and ($user.adminDescription.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
 		uid=$user.adminDescription;
 		expand=$expand;
 	}}
 
+	#дальше ищем по именам
+	#запоминаем по каким именам будем искать (разные непустые варианты из разных атрибутов)
+	$namesToTry=@()
+
+	$displayName=[string]$user.displayName
+	if ($displayName.Length -gt 0) {$namesToTry+=$displayName}
+
+	$cn=[string]$user.cn
+	if (($cn.Length -gt 0) -and ($cn -ne $displayName)) {$namesToTry+=$cn}
+
+	$name=[string]$user.name
+	if (($name.Length -gt 0) -and ($name -ne $displayName) -and ($name -ne $cn)) {$namesToTry+=$name}
+
+
+
 	#Если у нас есть ФИО - ищем по ФИО - тут тоже несколько и тоже лучший
-	if (($invUser -isnot [PSCustomObject]) -and ($adName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
-		name=$adName;
-		expand=$expand;
-	}}
+	foreach ($candidate in $namesToTry) {
+		if (($invUser -isnot [PSCustomObject]) -and ($user.displayName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
+			name=$candidate;
+			expand=$expand;
+		}}
+		if ($invUser -is [PSCustomObject]) {break}
+	}
 
 	#Последний сценарий - табельник вместо ФИО: учетку завели новому сотруднику, вписав в имя
 	#табельный номер, а ФИО подтянется из инвентаризации на первой же синхронизации
 	#(находиться должен один, т.к. так делают только при сквозной нумерации табельных)
-	if (($invUser -isnot [PSCustomObject]) -and ($adName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
-		num=$adName;
-		expand=$expand;
-	}}
-	
+	foreach ($candidate in $namesToTry) {
+		if (($invUser -isnot [PSCustomObject]) -and ($adName.Length -gt 0)) {$invUser=getInventoryObj 'users' '' @{
+			num=$candidate;
+			expand=$expand;
+		}}
+	}
+
 	if ($invUser -isnot [PSCustomObject]) {return $false}
 
 	return $invUser
@@ -398,26 +401,12 @@ function FindUser() {
 	$employments=@()
 	if (($anchor -is [PSCustomObject]) -and $anchor.uid) {
 		$employments=@(FetchEmployments @{uid=$anchor.uid})
-	} elseif ($user.adminDescription) {
-		$employments=@(FetchEmployments @{uid=$user.adminDescription})
 	}
 
-	if ( -not $employments.Count) {
-		$namesToTry=@()
-		$displayName=[string]$user.displayName
-		if ($displayName.Length -gt 0) {$namesToTry+=$displayName}
-		$cn=[string]$user.cn
-		if (($cn.Length -gt 0) -and ($cn -ne $displayName)) {$namesToTry+=$cn}
-		$name=[string]$user.name
-		if (($name.Length -gt 0) -and ($name -ne $displayName) -and ($name -ne $cn)) {$namesToTry+=$name}
-		foreach ($candidate in $namesToTry) {
-			$employments=@(FetchEmployments @{name=$candidate})
-			if ($employments.Count) {break}
-		}
-		if (( -not $employments.Count) -and ($anchor -is [PSCustomObject]) -and ($anchor.Ename.Length -gt 0)) {
-			$employments=@(FetchEmployments @{name=$anchor.Ename})
-		}
-	}
+	#запасной вариант если мы не нашли другие трудоустройства по uid (ИНН) то ищем по ФИО (небезопасно)
+	#if (( -not $employments.Count) -and ($anchor -is [PSCustomObject]) -and ($anchor.Ename.Length -gt 0)) {
+	#	$employments=@(FetchEmployments @{name=$anchor.Ename})
+	#}
 
 	#подстраховка: запись, найденная по логину/табельному, могла не попасть в выборку
 	#(нет UID, другое написание ФИО) - тогда работаем хотя бы по ней
@@ -518,9 +507,9 @@ function ParseUser() {
 	#Увольнять пользователя в АД не надо
 	$needDismiss = $false
 
-	
+
 	$invUser = FindUser($user)
-	
+
 	#Если пользователь не нашелся
 	if ($invUser -eq "error") {
 		debugLog($user.sAMAccountname+": Skip: got SAP error")
@@ -530,7 +519,7 @@ function ParseUser() {
 	#учетку перепривязали на другое трудоустройство - утаскиваем туда же все нажитое
 	#(делаем это до чтения телефона, чтобы он читался уже с новой записи)
 	MigrateEmployment $global:userRebindFrom $invUser
-	
+
 	#проверка увольнения
 	#увольняем только если ни одно трудоустройство человека уже не действует
 	#(приоритетное выбрано в FindUser, действующее всегда бьет уволенное)
@@ -545,7 +534,7 @@ function ParseUser() {
 			$needDismiss = $true
 		}
 	}
-	
+
 	#
 	if ($needDismiss) {
 		#Уволенных увольняем
@@ -565,10 +554,10 @@ function ParseUser() {
 				spooLog($user.sAMAccountname+ ": user dissmissed! Deactivation needed!")
 			}
 		}
-		
-	} 
-	
-	
+
+	}
+
+
 	#проверка пользователя на совпадение "названия" с ФИО
 	if (
 		($user.name -ne $invUser.Ename) -or
@@ -581,7 +570,7 @@ function ParseUser() {
 
 	#проверка Выводимого имени пользователя на совпадение с ФИО
 	if (
-		($user.displayName -ne $invUser.Ename) 
+		($user.displayName -ne $invUser.Ename)
 	){
 		spooLog($user.sAMAccountname+": got AD displayName ["+$user.displayName+"] instead of ["+$invUser.Ename+"]")
 		$user.displayName=$invUser.Ename
@@ -665,21 +654,21 @@ function ParseUser() {
 		$user.adminDescription=$invUser.uid
 		$needUpdate = $true
 	}
-		
+
 	#ID организации
 	if ($multiorg_support -and ($user.EmployeeNumber -ne $invUser.org_id) -and ($invUser.org_id.Length -gt 0)){
 		spooLog($user.sAMAccountname+": got AD Org ID ["+$user.EmployeeNumber+"] instead of ["+$invUser.org_id+"]")
 		$user.EmployeeNumber=$invUser.org_id
 		$needUpdate = $true
 	}
-	
+
 	#табельный номер
 	if (($user.EmployeeID -ne $invUser.employee_id) -and ($invUser.employee_id.Length -gt 0)){
 		spooLog($user.sAMAccountname+": got AD Numbr ["+$user.EmployeeID+"] instead of ["+$invUser.employee_id+"]")
 		$user.EmployeeID=$invUser.employee_id
 		$needUpdate = $true
 	}
-		
+
 	#мобильный номер телефона
 	$correctedMobile= correctPhonesList($invUser.Mobile)
 	if ([string]$user.mobile -ne [string]$correctedMobile) {
@@ -708,15 +697,15 @@ function ParseUser() {
 	#Внутренний номер телефона
 	#Запрашиваем номер телефона, привязанный к пользователю в Инвентаризации
 	$invUserPh=FetchEmploymentPhone $invUser.id
-	#если нужно почистить телефон	
+	#если нужно почистить телефон
 	if (($invUserPh -eq "") -and ($user.Pager.Length -gt 0)) {
 		spooLog($user.sAMAccountname+": got AD Phone ["+$user.pager+"] instead of ["+$invUserPh+"]")
 		if ($write_AD) {
 			$tmpUser = Get-ADUser $user.DistinguishedName
 			Set-AdUser $tmpUser -Clear Pager
-		}					
+		}
 	} elseIf (
-		($invUserPh.length -gt 2 ) -and 
+		($invUserPh.length -gt 2 ) -and
 		([string]$invUserPh -ne [string]$user.Pager)
 	) {
 		spooLog($user.sAMAccountname+": got AD Phone ["+$user.pager+"] instead of ["+$invUserPh+"]")
@@ -755,8 +744,8 @@ function ParseUser() {
                     #spooLog ("Removing $($_.Name) property");
                 #}
             #}
-			$user 
-			Set-AdUser -Instance $user 
+			$user
+			Set-AdUser -Instance $user
 			spooLog($user.sAMAccountname+": changes pushed to AD")
 		} else {
 			spooLog($user.sAMAccountname+": AD push skipped: AD RO mode")
@@ -778,9 +767,9 @@ function ParseUser() {
 		spooLog($user.sAMAccountname+": got SAP Login ["+$invUser.Login+"] instead of ["+$user.sAMAccountname+"]")
 		pushUserData $invUser.id Login $user.sAMAccountname
 	}
-	
-	
-	
+
+
+
 }
 
 Import-Module ActiveDirectory
@@ -812,7 +801,7 @@ if ($args.Length -gt 0) {
 		$stickyOrg=$stickyOrgDefault
 		if ($null -ne $params.stickyOrg) {$stickyOrg=$params.stickyOrg}
 		$users = Get-ADUser -Filter {enabled -eq $true} -SearchBase $u_OUDN -properties Name,cn,sn,givenName,DisplayName,sAMAccountname,company,department,title,employeeNumber,employeeID,mail,pager,mobile,telephoneNumber,adminDescription
-		$u_count = $users | measure 
+		$u_count = $users | measure
 		Write-Host "Users to sync: " $u_count.Count
 
 		foreach($user in $users) {
