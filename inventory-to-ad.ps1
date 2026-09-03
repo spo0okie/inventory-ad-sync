@@ -403,9 +403,20 @@ function FindUser() {
 	}
 
 	if ( -not $employments.Count) {
-		$name=ADUserName $user
-		if (($anchor -is [PSCustomObject]) -and ($anchor.Ename.Length -gt 0)) {$name=$anchor.Ename}
-		if ($name.Length -gt 0) {$employments=@(FetchEmployments @{name=$name})}
+		$namesToTry=@()
+		$displayName=[string]$user.displayName
+		if ($displayName.Length -gt 0) {$namesToTry+=$displayName}
+		$cn=[string]$user.cn
+		if (($cn.Length -gt 0) -and ($cn -ne $displayName)) {$namesToTry+=$cn}
+		$name=[string]$user.name
+		if (($name.Length -gt 0) -and ($name -ne $displayName) -and ($name -ne $cn)) {$namesToTry+=$name}
+		foreach ($candidate in $namesToTry) {
+			$employments=@(FetchEmployments @{name=$candidate})
+			if ($employments.Count) {break}
+		}
+		if (( -not $employments.Count) -and ($anchor -is [PSCustomObject]) -and ($anchor.Ename.Length -gt 0)) {
+			$employments=@(FetchEmployments @{name=$anchor.Ename})
+		}
 	}
 
 	#подстраховка: запись, найденная по логину/табельному, могла не попасть в выборку
