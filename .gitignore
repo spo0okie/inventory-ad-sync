@@ -1,2 +1,4 @@
 *.log
+*.flg
+*.lst
 _arch

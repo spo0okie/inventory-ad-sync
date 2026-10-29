@@ -35,6 +35,17 @@ $libs_path=$libs_path.TrimEnd('\')
 . "$($libs_path)\lib_inventory.ps1"
 . "$($libs_path)\lib_usr_ad.ps1"
 
+#404 при поиске - штатный промах: кадровую запись ищем последовательно по разным ключам, а о том,
+#что человек не нашелся совсем, пишется своя внятная строка. Без этого каждый промах уходил бы
+#в errorLog и зажигал флаг ошибок на каждом прогоне
+$global:skip404errors=$true
+
+#точка контроля для мониторинга: errorLog (lib_funcs) выставляет флаг и копит тексты ошибок,
+#в конце полного прогона они уходят во флаг-файл (см. writeErrorFlag)
+$global:scriptErrorsFlag=0
+$global:scriptErrorsArray=[ordered]@{}
+if (-not $inventory2ad_errorFlagFile) {$inventory2ad_errorFlagFile="$($PSScriptRoot)\inventory-to-ad_error.flg"}
+
 #связи, которые нужно подтягивать вместе с кадровой записью
 $inventory_user_expand='ln,mn,fn,orgStruct,org'
 
@@ -59,9 +70,68 @@ function pushUserData() {
 	}
 
 	if ($write_inventory) {
-		setInventoryData 'users' $params
+		$result=setInventoryData 'users' $params
+		#подробности ошибки lib_inventory пишет сам (кроме 404 - он заглушен), здесь уточняем, что именно не записалось
+		if ($result -is [bool]) {
+			errorLog("invPush: failed to set user #$id $field = $value")
+		}
 	} else {
 		spooLog("invPush: skip user #$id $field = $value INV: RO mode")
+	}
+}
+
+#выполняет действие с АД так, чтобы любая его ошибка попала в errorLog, а значит и во флаг-файл ошибок:
+#ошибки AD-командлетов в большинстве не-терминирующие и иначе только мелькают красным в консоли
+#ход выполнения при этом не меняется - не-терминирующая ошибка, как и раньше, не прерывает действие
+#(важно для DisableADUser из нескольких шагов), а подбирается из $Error после него.
+#поэтому внутри $action не должно быть своих перехваченных ошибок - они тоже окажутся в $Error
+#возвращает $true, если действие прошло без ошибок
+function invokeAD() {
+	param
+	(
+		[string]$description,
+		[scriptblock]$action
+	)
+	$Error.Clear()
+	try {
+		$null=& $action
+	} catch {
+		errorLog("$($description): $($_.Exception.Message)")
+		return $false
+	}
+	if ($Error.Count -eq 0) {return $true}
+	#в $Error последняя ошибка идет первой - в лог пишем по порядку возникновения
+	for ($i=$Error.Count-1; $i -ge 0; $i--) {
+		errorLog("$($description): $([string]$Error[$i])")
+	}
+	return $false
+}
+
+#точка контроля для мониторинга, пишется в конце полного прогона:
+#<флаг-файл> - 1, если за прогон были ошибки (errorLog), иначе 0. Перезаписывается на каждом прогоне,
+#поэтому время его изменения - время последнего прогона, дошедшего до конца (упал или не запускался - файл устаревает)
+#<флаг-файл с расширением .lst> - список ошибок прогона "<сколько раз>x :<текст>" (пустой, если ошибок нет)
+#предупреждения (warningLog) флаг не зажигают
+function writeErrorFlag() {
+	param
+	(
+		[string]$flagFile
+	)
+	$errList=@()
+	foreach ($err in $global:scriptErrorsArray.GetEnumerator()) {
+		$errList+= -join ($err.Value,"x :",$err.Name)
+	}
+
+	#список пишем раньше флага: увидев свежий флаг, мониторинг должен найти рядом уже актуальный список
+	$listFile=[System.IO.Path]::ChangeExtension($flagFile,'.lst')
+	($errList | Sort-Object) -join "`r`n" | Out-File -filePath $listFile -encoding Default
+	#флаг - одна цифра без BOM и перевода строки, чтобы мониторинг читал его как число без разбора кодировок
+	[string][int]$global:scriptErrorsFlag | Out-File -filePath $flagFile -encoding ascii -NoNewline
+
+	if ($global:scriptErrorsFlag) {
+		spooLog("sync complete with errors ($($errList.Count) distinct), see $listFile")
+	} else {
+		spooLog("sync complete with no errors")
 	}
 }
 
@@ -81,6 +151,21 @@ function parseInventoryDate() {
 	}
 }
 
+#помечено ли трудоустройство уволенным с точки зрения инвентаризации
+#resigned - итоговый признак, который считает сама инвентаризация: Uvolen за вычетом
+#отложенного там увольнения (до даты или бессрочно). Пока увольнение отложено, запись для нас
+#обычная действующая. Старая инвентаризация resigned не отдает - тогда смотрим на Uvolen
+function isDismissedEmployment() {
+	param
+	(
+		[object]$employment
+	)
+	if ($employment.PSObject.Properties['resigned']) {
+		return ("$($employment.resigned)" -in @('True','1'))
+	}
+	return ($employment.Uvolen -eq "1")
+}
+
 #действующее ли трудоустройство:
 #либо не помечено уволенным, либо дата увольнения еще не наступила
 function isActiveEmployment() {
@@ -88,7 +173,7 @@ function isActiveEmployment() {
 	(
 		[object]$employment
 	)
-	if ($employment.Uvolen -ne "1") {return $true}
+	if ( -not (isDismissedEmployment $employment)) {return $true}
 	$resign_date=parseInventoryDate $employment.resign_date
 	#уволен без даты увольнения - считаем что уже уволен
 	if ($null -eq $resign_date) {return $false}
@@ -261,7 +346,7 @@ function SelectSwitchTargets() {
 	$targets=@()
 	foreach ($employment in $employments) {
 		$isCurrent=(($current -is [PSCustomObject]) -and ([string]$employment.id -eq [string]$current.id))
-		if (($employment.Uvolen -ne "1") -or $isCurrent) {
+		if (( -not (isDismissedEmployment $employment)) -or $isCurrent) {
 			$targets+=$employment
 		} else {
 			debugLog("employment #$($employment.id) is dismissed, not a switch target")
@@ -443,8 +528,13 @@ function FindUser() {
 	}
 
 	#предупреждаем о предстоящем увольнении, если дата еще не наступила
-	if (($invUser.Uvolen -eq "1") -and (isActiveEmployment $invUser)) {
+	if ((isDismissedEmployment $invUser) -and (isActiveEmployment $invUser)) {
 		warningLog("user ["+$user.sAMAccountname+"] with Name ["+$user.displayName+"] - to be dismissed @ "+$invUser.resign_date)
+	}
+
+	#по кадрам уволен, но в инвентаризации увольнение отложено - учетку не трогаем
+	if (($invUser.Uvolen -eq "1") -and ( -not (isDismissedEmployment $invUser))) {
+		debugLog("$($user.sAMAccountname): dismissal of employment #$($invUser.id) is deferred in inventory (until [$($invUser.resign_defer_until)])")
 	}
 
 	return $invUser
@@ -524,7 +614,7 @@ function ParseUser() {
 	#проверка увольнения
 	#увольняем только если ни одно трудоустройство человека уже не действует
 	#(приоритетное выбрано в FindUser, действующее всегда бьет уволенное)
-	if ($invUser.Uvolen -eq "1") {
+	if (isDismissedEmployment $invUser) {
 		#смотрим когда уволен
 		$resign_date=parseInventoryDate $invUser.resign_date
 		if ($null -eq $resign_date) {
@@ -546,9 +636,9 @@ function ParseUser() {
 			if ($auto_dismiss) {
 				spooLog($user.sAMAccountname+ ": user dissmissed! Deactivating")
 				if ($dismiss_script) {
-					Start-Process -FilePath $dismiss_script -ArgumentList $user.sAMAccountname -NoNewWindow
+					$null=invokeAD "$($user.sAMAccountname): starting dismiss script" {Start-Process -FilePath $dismiss_script -ArgumentList $user.sAMAccountname -NoNewWindow}
 				} else {
-					DisableADUser($user)
+					$null=invokeAD "$($user.sAMAccountname): deactivation" {DisableADUser($user)}
 				}
 				return
 			} else {
@@ -595,16 +685,20 @@ function ParseUser() {
     		$needUpdate = $true
         } else {
         	if ($write_AD) {
-            	$tmpUser = Get-ADUser $user.DistinguishedName
-				Set-AdUser $tmpUser -Clear sn
+				$null=invokeAD "$($user.sAMAccountname): clearing AD sn" {
+					$tmpUser = Get-ADUser $user.DistinguishedName
+					Set-AdUser $tmpUser -Clear sn
+				}
 			}
         }
         if ($gn.Length -gt 0) {
     		$user.givenName=$gn
         } else {
         	if ($write_AD) {
-            	$tmpUser = Get-ADUser $user.DistinguishedName
-				Set-AdUser $tmpUser -Clear givenName
+				$null=invokeAD "$($user.sAMAccountname): clearing AD givenName" {
+					$tmpUser = Get-ADUser $user.DistinguishedName
+					Set-AdUser $tmpUser -Clear givenName
+				}
 			}
         }
 	}
@@ -677,8 +771,10 @@ function ParseUser() {
 		if ($correctedMobile -eq "") {
 			spooLog($user.sAMAccountname+": got AD mobile ["+$user.mobile+"] instead of [empty]")
 			if ($write_AD) {
-				$tmpUser = Get-ADUser $user.DistinguishedName
-				Set-AdUser $tmpUser -Clear mobile
+				$null=invokeAD "$($user.sAMAccountname): clearing AD mobile" {
+					$tmpUser = Get-ADUser $user.DistinguishedName
+					Set-AdUser $tmpUser -Clear mobile
+				}
 			}
 		} else {
 			spooLog($user.sAMAccountname+": got AD mobile ["+$user.mobile+"] instead of ["+$correctedMobile+"]")
@@ -702,8 +798,10 @@ function ParseUser() {
 	if (($invUserPh -eq "") -and ($user.Pager.Length -gt 0)) {
 		spooLog($user.sAMAccountname+": got AD Phone ["+$user.pager+"] instead of ["+$invUserPh+"]")
 		if ($write_AD) {
-			$tmpUser = Get-ADUser $user.DistinguishedName
-			Set-AdUser $tmpUser -Clear Pager
+			$null=invokeAD "$($user.sAMAccountname): clearing AD pager" {
+				$tmpUser = Get-ADUser $user.DistinguishedName
+				Set-AdUser $tmpUser -Clear Pager
+			}
 		}
 	} elseIf (
 		($invUserPh.length -gt 2 ) -and
@@ -746,8 +844,9 @@ function ParseUser() {
                 #}
             #}
 			$user
-			Set-AdUser -Instance $user
-			spooLog($user.sAMAccountname+": changes pushed to AD")
+			if (invokeAD "$($user.sAMAccountname): pushing changes to AD" {Set-AdUser -Instance $user}) {
+				spooLog($user.sAMAccountname+": changes pushed to AD")
+			}
 		} else {
 			spooLog($user.sAMAccountname+": AD push skipped: AD RO mode")
 		}
@@ -756,8 +855,9 @@ function ParseUser() {
 	if ($needRename) {
 		if ($write_AD) {
 			spooLog($user.sAMAccountname+": AdObject renaming to "+$invUser.Ename)
-			Rename-AdObject -Identity $user -Newname $invUser.Ename
-			spooLog($user.sAMAccountname+": AdObject renamed to "+$invUser.Ename)
+			if (invokeAD "$($user.sAMAccountname): renaming AdObject to $($invUser.Ename)" {Rename-AdObject -Identity $user -Newname $invUser.Ename}) {
+				spooLog($user.sAMAccountname+": AdObject renamed to "+$invUser.Ename)
+			}
 		} else {
 			spooLog($user.sAMAccountname+": rename $($user.sAMAccountname) -> $($invUser.Ename) skipped: AD RO mode")
 		}
@@ -795,13 +895,22 @@ if ($args.Length -gt 0) {
 		ParseUser ($user)
 	}
 } else {
+	#без списка OU foreach молча не сделает ни одной итерации - для мониторинга это ошибка, а не "все хорошо"
+	if (-not $inventory2ad_sync) {
+		errorLog("`$inventory2ad_sync is not defined or empty in config - nothing to sync")
+	}
 	foreach ($params in $inventory2ad_sync) {
 		$u_OUDN=$params.u_OUDN
 		$f_OUDN=$params.f_OUDN
 		#приоритетная организация может задаваться на каждый OU отдельно
 		$stickyOrg=$stickyOrgDefault
 		if ($null -ne $params.stickyOrg) {$stickyOrg=$params.stickyOrg}
-		$users = Get-ADUser -Filter {enabled -eq $true} -SearchBase $u_OUDN -properties Name,cn,sn,givenName,DisplayName,sAMAccountname,company,department,title,employeeNumber,employeeID,mail,pager,mobile,telephoneNumber,adminDescription
+		try {
+			$users = Get-ADUser -Filter {enabled -eq $true} -SearchBase $u_OUDN -properties Name,cn,sn,givenName,DisplayName,sAMAccountname,company,department,title,employeeNumber,employeeID,mail,pager,mobile,telephoneNumber,adminDescription -ErrorAction Stop
+		} catch {
+			errorLog("cant load users from [$u_OUDN]: $($_.Exception.Message)")
+			continue
+		}
 		$u_count = $users | measure
 		Write-Host "Users to sync: " $u_count.Count
 
@@ -811,4 +920,8 @@ if ($args.Length -gt 0) {
 			#exit
 		}
 	}
+
+	#флаг-файл пишет только полный прогон: отладочный прогон одного пользователя
+	#не должен ни сбрасывать, ни зажигать состояние, которое видит мониторинг
+	writeErrorFlag $inventory2ad_errorFlagFile
 }
